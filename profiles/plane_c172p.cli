@@ -1,0 +1,36 @@
+# INAV config for the JSBSim Cessna 172 (c172p), applied to a fresh eeprom.
+# Plain INAV CLI: anything here could be pasted into the configurator.
+
+set platform_type = AIRPLANE
+mmix reset
+mmix 0 1.000 0.000 0.000 0.000       # engine
+smix reset
+smix 0 0 0 100 0 -1                  # servo 0 aileron  <- stabilized roll
+smix 1 1 1 100 0 -1                  # servo 1 elevator <- stabilized pitch
+smix 2 2 2 100 0 -1                  # servo 2 rudder   <- stabilized yaw
+
+# sensors come in over MSP_SIMULATOR
+set receiver_type = SIM (SITL)
+set baro_hardware = FAKE
+set mag_hardware = FAKE
+set pitot_hardware = NONE
+feature GPS
+set gps_provider = MSP
+set init_gyro_cal = OFF              # no real gyro behind HITL; boot calibration would never finish
+
+# nav tuned for a 1100 kg Cessna, not a foamie: INAV's defaults (cruise 1400,
+# max 1700, 20 deg climb) leave it too slow to climb, so RTH never turns home
+set nav_fw_cruise_thr = 1650
+set nav_fw_min_thr = 1300
+set nav_fw_max_thr = 2000
+set nav_fw_climb_angle = 8
+set nav_fw_dive_angle = 8
+set nav_fw_bank_angle = 25
+
+# switches: AUX1 arm, AUX2 angle, AUX3 mid althold / high poshold (loiter), AUX4 mid RTH / high WP
+aux 0 0 0 1700 2100
+aux 1 1 1 1300 2100
+aux 2 3 2 1300 1700
+aux 3 11 2 1700 2100
+aux 4 10 3 1300 1700
+aux 5 28 3 1700 2100

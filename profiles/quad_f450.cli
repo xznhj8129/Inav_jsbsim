@@ -1,0 +1,29 @@
+# INAV config for the JSBSim F450 quad, applied to a fresh eeprom.
+# Plain INAV CLI: anything here could be pasted into the configurator.
+
+set platform_type = MULTIROTOR
+mmix reset
+mmix 0 1.000 -1.000  1.000 -1.000    # rear right
+mmix 1 1.000 -1.000 -1.000  1.000    # front right
+mmix 2 1.000  1.000  1.000  1.000    # rear left
+mmix 3 1.000  1.000 -1.000 -1.000    # front left
+
+# sensors come in over MSP_SIMULATOR
+set receiver_type = SIM (SITL)
+set baro_hardware = FAKE
+set mag_hardware = FAKE
+set pitot_hardware = NONE
+feature GPS
+set gps_provider = MSP
+set init_gyro_cal = OFF              # no real gyro behind HITL; boot calibration would never finish
+
+# the F450 hovers at ~42% ESC command
+set nav_mc_hover_thr = 1420
+
+# switches: AUX1 arm, AUX2 angle, AUX3 mid althold / high poshold, AUX4 mid RTH / high WP
+aux 0 0 0 1700 2100
+aux 1 1 1 1300 2100
+aux 2 3 2 1300 1700
+aux 3 11 2 1700 2100
+aux 4 10 3 1300 1700
+aux 5 28 3 1700 2100
