@@ -12,7 +12,7 @@ import jsbsim
 
 FT = 0.3048
 HOME = (36.530440, -83.216383)          # Sneedville, TN
-PROFILES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "profiles")
+PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
 
 
 @dataclass(frozen=True)

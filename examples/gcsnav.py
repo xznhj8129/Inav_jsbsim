@@ -23,10 +23,10 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from inavbench import Bench
+from inavbench.gcs import GCSNAV_AUX
 from inavbench.mavudp import Relay
 from plane_runway_takeoff import RUNWAY_HEADING, takeoff
 
-GCSNAV_AUX = "aux 7 31 2 1700 2100"    # GCS NAV on AUX3 high, the same position as NAV POSHOLD
 PLANE_OVERSHOOT_M = 20                   # the plane climbs on this much while levelling off
 
 

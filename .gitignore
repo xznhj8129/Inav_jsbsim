@@ -1,2 +1,6 @@
 __pycache__/
 *.csv
+swarm_replay.json
+*_replay.html
+*.egg-info/
+build/

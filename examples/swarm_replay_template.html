@@ -1,0 +1,340 @@
+<title>Sneedville Flock Replay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+  /* A night flight-test screen: one deliberate dark look. Route magenta is the VFR-chart convention. */
+  :root {
+    color-scheme: dark;
+    --ground: #0c171b;
+    --panel: #12222a;
+    --line: #22363f;
+    --text: #d9dfd6;
+    --muted: #8fa3a5;
+    --route: #d23c9a;
+    --radio: #5fc3d6;
+    --amber: #e8a33d;
+    --warn: #e2574c;
+    --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+    --body: "Barlow", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "DejaVu Sans Mono", monospace;
+  }
+  html, body { background: var(--ground); color: var(--text); }
+  body { font: 15px/1.5 var(--body); padding-block: 20px 32px; padding-inline: 16px; }
+  .wrap { max-width: 1280px; margin: 0 auto; display: grid; gap: 16px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 24px; }
+  h1 { font: 700 clamp(26px, 4vw, 38px)/1.05 var(--display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
+  h1 em { color: var(--route); font-style: normal; }
+  .sub { color: var(--muted); max-width: 70ch; margin: 4px 0 0; }
+  .metar { font: 500 13px/1.4 var(--mono); color: var(--amber); background: var(--panel); border: 1px solid var(--line);
+           padding: 8px 12px; overflow-x: auto; white-space: nowrap; }
+  .metar b { color: var(--muted); font-weight: 400; margin-right: 10px; }
+  .main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .main { grid-template-columns: minmax(0, 1fr); } }
+  .stage { position: relative; background: #081115; border: 1px solid var(--line); aspect-ratio: 16 / 10; max-height: 72vh; width: 100%; max-width: 100%; }
+  .stage canvas { display: block; width: 100% !important; height: 100% !important; }
+  .clock { position: absolute; left: 12px; top: 10px; font: 600 28px/1 var(--display); letter-spacing: .04em; pointer-events: none; }
+  .clock small { display: block; font: 500 11px/1.4 var(--mono); color: var(--muted); letter-spacing: 0; }
+  .legend { position: absolute; right: 12px; top: 10px; display: grid; gap: 3px; font: 500 11px/1.3 var(--mono); color: var(--muted); pointer-events: none; text-align: right; }
+  .legend i { display: inline-block; width: 18px; height: 2px; vertical-align: middle; margin-left: 6px; }
+  .transport { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+  button { font: 600 14px/1 var(--display); letter-spacing: .06em; text-transform: uppercase; color: var(--text); background: var(--panel);
+           border: 1px solid var(--line); padding: 9px 14px; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  #scrub { flex: 1 1 240px; accent-color: var(--route); }
+  aside { background: var(--panel); border: 1px solid var(--line); padding: 14px; display: grid; gap: 14px; }
+  aside h2 { font: 600 13px/1 var(--display); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); margin: 0; }
+  .stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+  .stat div { font: 600 24px/1.1 var(--display); font-variant-numeric: tabular-nums; }
+  .stat span { font: 11px/1.3 var(--mono); color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font: 12px/1.35 var(--mono); font-variant-numeric: tabular-nums; }
+  th { text-align: right; font-weight: 400; color: var(--muted); padding: 0 0 6px 6px; }
+  th:first-child, td:first-child { text-align: left; padding-left: 0; }
+  td { text-align: right; padding: 5px 0 5px 6px; border-top: 1px solid var(--line); }
+  .chip { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+  .em { display: inline-block; width: 34px; height: 6px; background: var(--line); position: relative; vertical-align: 1px; }
+  .em i { position: absolute; inset: 0 auto 0 0; background: var(--warn); }
+  .notes { color: var(--muted); font-size: 13px; max-width: 75ch; display: grid; gap: 6px; }
+  .notes p { margin: 0; }
+  .notes code { font: 12px var(--mono); color: var(--text); }
+</style>
+
+<div class="wrap">
+  <header>
+    <div>
+      <h1><span id="count-word">Six</span> INAV quads, <em>one borrowed brain</em></h1>
+      <p class="sub">Real INAV 10 SITL firmware on JSBSim physics over Sneedville, TN. Each quad's companion runs the same flocking agent, knows the others only through a lossy radio, and steers its own flight controller through GCS NAV.</p>
+    </div>
+  </header>
+  <div class="metar" id="metar"><b>live wind source</b><span></span></div>
+
+  <div class="main">
+    <div style="display:grid; gap:10px">
+      <div class="stage" id="stage">
+        <div class="clock" id="clock">T+0:00<small>flocking phase</small></div>
+        <div class="legend">
+          <div>route (chart magenta)<i style="background:var(--route)"></i></div>
+          <div>radio beacon heard<i style="background:var(--radio)"></i></div>
+          <div>GCS NAV target<i style="background:var(--amber)"></i></div>
+        </div>
+      </div>
+      <div class="transport">
+        <button id="play" type="button" aria-pressed="false">Play</button>
+        <input id="scrub" type="range" min="0" max="1000" value="0" step="1" aria-label="Replay time">
+        <button id="speed" type="button">Speed 4×</button>
+        <button id="follow" type="button" aria-pressed="true">Follow flock</button>
+        <button id="targets" type="button" aria-pressed="true">Targets</button>
+      </div>
+    </div>
+
+    <aside>
+      <h2>Flock</h2>
+      <div class="stats">
+        <div class="stat"><div id="st-sep">–</div><span>closest pair, m</span></div>
+        <div class="stat"><div id="st-spread">–</div><span>spread from centre, m</span></div>
+        <div class="stat"><div id="st-radio">–</div><span>beacons heard / s</span></div>
+        <div class="stat"><div id="st-wind">–</div><span>METAR wind</span></div>
+      </div>
+      <h2>Quads</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>sysid</th><th>alt m</th><th>m/s</th><th>hears</th><th>leg</th><th>spacing</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </aside>
+  </div>
+
+  <div class="notes">
+    <p>Positions are simulator ground truth. Each brain steered on its own flight controller's estimate, which averaged <span id="n-fcerr"></span> m from it. A thin cyan line means a beacon crossed the radio in the last second: 2 Hz beacons, <span id="n-range"></span> m range, <span id="n-loss"></span>% packet loss. The amber ring is the waypoint #255 the brain last sent its FC. "spacing" is the agent's own emergency-separation level.</p>
+    <p>Drag to orbit, scroll or pinch to zoom. Built with <code>inavbench</code>: <code>examples/swarm_flock.py</code> then <code>examples/swarm_replay.py</code>.</p>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const DATA = /*REPLAY_DATA*/null;
+const QUAD_COLORS = ["#f0c24b", "#6fd39a", "#f07a54", "#8fa8ff", "#e0e6e1", "#c58cf0", "#5fd3c4", "#ff9fc4"];
+const ids = Object.keys(DATA.quads).sort((a, b) => a - b);
+const tEnd = Math.max(...ids.map(id => { const t = DATA.quads[id].t; return t[t.length - 1]; }));
+
+document.querySelector("#metar span").textContent = DATA.metar;
+document.getElementById("n-range").textContent = Math.round(DATA.radio_range_m);
+document.getElementById("n-loss").textContent = Math.round(DATA.radio_loss * 100);
+document.getElementById("n-fcerr").textContent = DATA.fc_error_m.toFixed(2);
+document.getElementById("count-word").textContent =
+  ["Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"][ids.length] || String(ids.length);
+const windSpeed = Math.hypot(DATA.wind[0], DATA.wind[1]);
+document.getElementById("st-wind").textContent = windSpeed < 0.2 ? "calm" :
+  `${windSpeed.toFixed(1)} m/s → ${Math.round((Math.atan2(DATA.wind[1], DATA.wind[0]) * 180 / Math.PI + 360) % 360)}°`;
+
+// world frame: east, north, up (m). three.js: x = east, y = up, z = -north
+const v3 = p => new THREE.Vector3(p[0], p[2], -p[1]);
+
+const stage = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setClearColor(0x081115);
+stage.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x081115, 400, 1100);
+const camera = new THREE.PerspectiveCamera(45, 16 / 10, 1, 4000);
+camera.position.set(-70, 75, 115);
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.maxPolarAngle = Math.PI * 0.49;
+
+// ground: 10 m minor / 100 m major grid, like a survey sheet
+const grid = new THREE.GridHelper(1200, 120, 0x2b4650, 0x16272e);
+scene.add(grid);
+const major = new THREE.GridHelper(1200, 12, 0x3d6570, 0x3d6570);
+major.position.y = 0.05;
+scene.add(major);
+
+// route: closed loop in chart magenta, with its waypoints
+const routePts = DATA.route.map(v3);
+const routeLine = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(routePts),
+  new THREE.LineBasicMaterial({ color: 0xd23c9a }));
+scene.add(routeLine);
+routePts.forEach(p => {
+  const m = new THREE.Mesh(new THREE.OctahedronGeometry(2.2), new THREE.MeshBasicMaterial({ color: 0xd23c9a }));
+  m.position.copy(p);
+  scene.add(m);
+  const drop = new THREE.Line(new THREE.BufferGeometry().setFromPoints([p, new THREE.Vector3(p.x, 0, p.z)]),
+    new THREE.LineBasicMaterial({ color: 0x6b2a52 }));
+  scene.add(drop);
+});
+
+// quads: an X frame, a trail, a height line to the ground and the GCS NAV target ring
+function quadMesh(color) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color });
+  [Math.PI / 4, -Math.PI / 4].forEach(a => {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(9, 0.8, 0.8), mat);
+    arm.rotation.y = a;
+    g.add(arm);
+  });
+  [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([x, z]) => {
+    const rotor = new THREE.Mesh(new THREE.TorusGeometry(1.5, 0.25, 6, 16), mat);
+    rotor.rotation.x = Math.PI / 2;
+    rotor.position.set(x * 3.2, 0.4, z * 3.2);
+    g.add(rotor);
+  });
+  return g;
+}
+const TRAIL = 150;              // samples (30 s at 5 Hz)
+const craft = ids.map((id, k) => {
+  const color = new THREE.Color(QUAD_COLORS[k % QUAD_COLORS.length]);
+  const body = quadMesh(color);
+  scene.add(body);
+  const trailGeo = new THREE.BufferGeometry();
+  trailGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(TRAIL * 3), 3));
+  const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.75 }));
+  scene.add(trail);
+  const stalk = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.25 }));
+  scene.add(stalk);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(1.6, 2.2, 20), new THREE.MeshBasicMaterial({ color: 0xe8a33d, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2;
+  scene.add(ring);
+  return { id, q: DATA.quads[id], color: QUAD_COLORS[k % QUAD_COLORS.length], body, trail, stalk, ring };
+});
+
+// radio: one line per beacon heard in the last second, faded by age
+const MAX_LINKS = 200;
+const linkGeo = new THREE.BufferGeometry();
+linkGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX_LINKS * 6), 3));
+linkGeo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(MAX_LINKS * 6), 3));
+const linkLines = new THREE.LineSegments(linkGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9 }));
+scene.add(linkLines);
+const radioColor = new THREE.Color(0x5fc3d6), bg = new THREE.Color(0x081115);
+DATA.links.sort((a, b) => a[0] - b[0]);
+const linkTimes = DATA.links.map(l => l[0]);      // newest link at or before t is found by binary search
+
+function sampleIndex(ts, t) {
+  let lo = 0, hi = ts.length - 1;
+  if (t <= ts[0]) return 0;
+  if (t >= ts[hi]) return hi;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (ts[mid] <= t) lo = mid; else hi = mid; }
+  return lo;
+}
+function positionAt(q, t) {
+  const i = sampleIndex(q.t, t), j = Math.min(i + 1, q.t.length - 1);
+  const f = j === i ? 0 : Math.min(1, Math.max(0, (t - q.t[i]) / (q.t[j] - q.t[i])));
+  const a = q.p[i], b = q.p[j];
+  return { i, p: [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f] };
+}
+
+const rows = document.getElementById("rows");
+rows.innerHTML = craft.map(c =>
+  `<tr><td><span class="chip" style="background:${c.color}"></span>#${c.id}</td><td id="a${c.id}"></td><td id="v${c.id}"></td>` +
+  `<td id="h${c.id}"></td><td id="s${c.id}"></td><td><span class="em"><i id="e${c.id}" style="width:0"></i></span></td></tr>`).join("");
+const cell = id => document.getElementById(id);
+
+let t = 0, playing = false, speed = 4, follow = true, showTargets = true, last = performance.now();
+const scrub = document.getElementById("scrub");
+
+function render() {
+  const now = [];
+  craft.forEach(c => {
+    const { i, p } = positionAt(c.q, t);
+    now.push(p);
+    const pos = v3(p);
+    c.body.position.copy(pos);
+    const k = Math.min(i + 1, c.q.p.length - 1), prev = c.q.p[Math.max(0, i - 1)], next = c.q.p[k];
+    c.body.rotation.y = Math.atan2(-(next[1] - prev[1]), next[0] - prev[0]) || c.body.rotation.y;
+    const arr = c.trail.geometry.attributes.position.array;
+    for (let s = 0; s < TRAIL; s++) {
+      const src = c.q.p[Math.max(0, i - TRAIL + 1 + s)];
+      arr[s * 3] = src[0]; arr[s * 3 + 1] = src[2]; arr[s * 3 + 2] = -src[1];
+    }
+    arr[(TRAIL - 1) * 3] = p[0]; arr[(TRAIL - 1) * 3 + 1] = p[2]; arr[(TRAIL - 1) * 3 + 2] = -p[1];
+    c.trail.geometry.attributes.position.needsUpdate = true;
+    c.stalk.geometry.setFromPoints([pos, new THREE.Vector3(pos.x, 0, pos.z)]);
+    c.ring.visible = showTargets;
+    c.ring.position.copy(v3(c.q.tgt[i]));
+    const dt = c.q.t[k] - c.q.t[Math.max(0, i - 1)] || 1;
+    const spd = Math.hypot(next[0] - prev[0], next[1] - prev[1], next[2] - prev[2]) / dt;
+    cell("a" + c.id).textContent = p[2].toFixed(1);
+    cell("v" + c.id).textContent = spd.toFixed(1);
+    cell("h" + c.id).textContent = c.q.n[i].length;
+    cell("s" + c.id).textContent = c.q.seg[i];
+    cell("e" + c.id).style.width = Math.round(c.q.em[i] * 100) + "%";
+  });
+
+  // radio links heard in the last second
+  const pos = linkGeo.attributes.position.array, col = linkGeo.attributes.color.array;
+  let n = 0, recent = 0;
+  const byId = Object.fromEntries(craft.map((c, k) => [c.id, now[k]]));
+  for (let L = sampleIndex(linkTimes, t); L >= 0 && n < MAX_LINKS; L--) {
+    const [lt, a, b] = DATA.links[L];
+    if (lt > t) continue;
+    if (t - lt > 1.0) break;
+    recent++;
+    const pa = byId[a], pb = byId[b];
+    if (!pa || !pb) continue;
+    const fade = 1 - (t - lt);
+    const c = bg.clone().lerp(radioColor, 0.35 + 0.65 * fade);
+    pos.set([pa[0], pa[2], -pa[1], pb[0], pb[2], -pb[1]], n * 6);
+    col.set([c.r, c.g, c.b, c.r, c.g, c.b], n * 6);
+    n++;
+  }
+  linkGeo.setDrawRange(0, n * 2);
+  linkGeo.attributes.position.needsUpdate = true;
+  linkGeo.attributes.color.needsUpdate = true;
+
+  let closest = Infinity, centre = [0, 0, 0];
+  now.forEach(p => { centre[0] += p[0] / now.length; centre[1] += p[1] / now.length; centre[2] += p[2] / now.length; });
+  now.forEach((p, a) => now.forEach((q, b) => { if (b > a) closest = Math.min(closest, Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2])); }));
+  const spread = Math.max(...now.map(p => Math.hypot(p[0] - centre[0], p[1] - centre[1], p[2] - centre[2])));
+  cell("st-sep").textContent = closest.toFixed(1);
+  cell("st-spread").textContent = spread.toFixed(0);
+  cell("st-radio").textContent = recent;
+  if (follow) {                 // carry the camera with the flock, keeping the viewer's orbit
+    const before = controls.target.clone();
+    controls.target.lerp(v3(centre), 0.08);
+    camera.position.add(controls.target.clone().sub(before));
+  }
+
+  const m = Math.floor(t / 60), s = Math.floor(t % 60);
+  document.getElementById("clock").firstChild.textContent = `T+${m}:${String(s).padStart(2, "0")}`;
+  scrub.value = Math.round(t / tEnd * 1000);
+}
+function frame(ts) {
+  const dt = Math.min(0.1, (ts - last) / 1000);
+  last = ts;
+  if (playing) { t += dt * speed; if (t >= tEnd) { t = tEnd; setPlaying(false); } }
+  render();
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(stage);
+resize();
+
+const playBtn = document.getElementById("play");
+function setPlaying(on) { playing = on; playBtn.textContent = on ? "Pause" : "Play"; playBtn.setAttribute("aria-pressed", on); }
+playBtn.onclick = () => { if (t >= tEnd) t = 0; setPlaying(!playing); };
+scrub.oninput = () => { t = scrub.value / 1000 * tEnd; };
+const speeds = [1, 4, 16];
+document.getElementById("speed").onclick = e => { speed = speeds[(speeds.indexOf(speed) + 1) % speeds.length]; e.target.textContent = `Speed ${speed}×`; };
+document.getElementById("follow").onclick = e => { follow = !follow; e.target.setAttribute("aria-pressed", follow); };
+document.getElementById("targets").onclick = e => { showTargets = !showTargets; e.target.setAttribute("aria-pressed", showTargets); };
+
+// open mid-flight so the first frame shows the flock, not the pads
+t = Math.min(tEnd, 45);
+controls.target.copy(v3(craft.map(c => positionAt(c.q, t).p).reduce((a, p) => [a[0] + p[0] / craft.length, a[1] + p[1] / craft.length, a[2] + p[2] / craft.length], [0, 0, 0])));
+camera.position.copy(controls.target).add(new THREE.Vector3(-70, 45, 95));
+if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) setPlaying(true);
+requestAnimationFrame(frame);
+</script>

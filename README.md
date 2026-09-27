@@ -6,7 +6,8 @@ Full guide (how it works, API, gotchas): AI_SHARED `projects/software/inav-devel
 
 ## Needs
 
-- JSBSim 1.3+ (`pip install jsbsim`); the `drone` conda env has it, plus mavsdk for `quad_swarm.py`
+- JSBSim 1.3+; the `drone` conda env has it, plus mavsdk for `quad_swarm.py`
+- the bench itself, installed from this checkout: `pip install -e .` (the `drone` env has it)
 - a SITL build of whatever INAV you're testing: `build_sitl/bin/SITL.elf`
 
 ## Check it works
@@ -41,6 +42,16 @@ For UDP (QGroundControl's default 14550) or several vehicles at once: `python3 -
 ## Layout
 
 - `inavbench/` — the bench: `bench.py` (SITL, RC, modes, loop, FC queries), `vehicles.py` (JSBSim plant and vehicle definitions), `hitl.py` (MSP_SIMULATOR frames), `msp.py` (MSP + CLI), `mavudp.py` (MAVLink TCP-to-UDP relay), `selftest.py`
-- `profiles/` — INAV CLI config per vehicle, applied to a fresh eeprom on every start
-- `examples/` — `quad_flight.py` (takeoff, POSHOLD, RTH landing) `plane_runway_takeoff.py` (Cessna runway takeoff to NAV ALTHOLD) and `quad_swarm.py` (four quads at once over UDP MAVLink); run with the SITL path as the argument
+- `inavbench/profiles/` — INAV CLI config per vehicle, applied to a fresh eeprom on every start
+- `inavbench/gcs.py` — GCS NAV: move a vehicle's POSHOLD target (waypoint #255) from outside; `inavbench/metar.py` — live METAR wind
+- `examples/` — run with the SITL path as the argument:
+    - `quad_flight.py`: takeoff, POSHOLD, RTH landing
+    - `plane_runway_takeoff.py`: Cessna runway takeoff to NAV ALTHOLD
+    - `gcsnav.py`: a quad or the plane airborne and held in NAV POSHOLD + GCS NAV, for a GCS to fly
+    - `quad_swarm.py`: four quads at once over UDP MAVLink
+    - `swarm_flock.py`: a flock steered by an external swarm brain over GCS NAV, with `swarm_replay.py` for a 3D replay page
 - `old/` — superseded scripts from before this bench, kept for reference
+
+## Built on it
+
+- OPERATION CLINCH (its own repo, `clinch`): a system-of-systems exercise with six quads and the Cessna, a lossy mesh, a command post, and CoT to TAK.
