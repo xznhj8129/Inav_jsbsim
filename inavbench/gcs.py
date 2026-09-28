@@ -6,6 +6,7 @@ from .vehicles import HOME
 
 GCSNAV_AUX = "aux 7 31 2 1700 2100"     # GCS NAV on AUX3 high, the same position as NAV POSHOLD in the profiles
 MSP_SET_WP = 209
+MSP2_COMMON_SETTING = 0x1003
 M_PER_DEG_LAT = 111320.0
 M_PER_DEG_LON = 111320.0 * math.cos(math.radians(HOME[0]))
 
@@ -18,6 +19,22 @@ def set_target(b, east, north, alt, heading):
     payload = struct.pack("<BBiiihhhB", 255, 1, round(lat * 1e7), round(lon * 1e7),
                           max(500, round(alt * 100)), round(heading) % 360 or 1, 0, 0, 0)   # INAV takes 1..359
     b.msp.request(MSP_SET_WP, payload)
+
+
+def pos_xy_gain(b):
+    """INAV's multicopter position P (1/s): in POSHOLD it flies toward #255 at gain * distance,
+    capped at nav_auto_speed and softened by nav_mc_pos_expo (set that to 0 to make it exact)."""
+    return b.msp.request(MSP2_COMMON_SETTING, b"nav_mc_pos_xy_p\0")[0] / 100.0
+
+
+def set_velocity(b, east, north, vel_east, vel_north, alt, heading, gain, period):
+    """Make a quad in NAV POSHOLD + GCS NAV, now at east/north, fly (vel_east, vel_north) m/s:
+    #255 goes where INAV's position P turns into that velocity, plus half a control period so
+    the average over the period, as the quad closes on it, comes out right. Returns the target."""
+    lead = 1.0 / gain + period / 2.0
+    target = (east + vel_east * lead, north + vel_north * lead, alt)
+    set_target(b, *target, heading)
+    return target
 
 
 def gcs_addresses(specs):

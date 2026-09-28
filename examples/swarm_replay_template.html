@@ -183,6 +183,9 @@ function quadMesh(color) {
     rotor.position.set(x * 3.2, 0.4, z * 3.2);
     g.add(rotor);
   });
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(4, 0.6, 0.6), new THREE.MeshBasicMaterial({ color: 0xff3b6b }));
+  nose.position.set(4.5, 0.4, 0);     // local +x is forward, between the two front rotors
+  g.add(nose);
   return g;
 }
 const TRAIL = 150;              // samples (30 s at 5 Hz)
@@ -245,7 +248,12 @@ function render() {
     const pos = v3(p);
     c.body.position.copy(pos);
     const k = Math.min(i + 1, c.q.p.length - 1), prev = c.q.p[Math.max(0, i - 1)], next = c.q.p[k];
-    c.body.rotation.y = Math.atan2(-(next[1] - prev[1]), next[0] - prev[0]) || c.body.rotation.y;
+    if (c.q.hd) {                       // the heading the brain commanded (deg from north): the real nose
+      const h = c.q.hd[i] * Math.PI / 180;
+      c.body.rotation.y = Math.atan2(Math.cos(h), Math.sin(h));     // scene: x east, -z north
+    } else {                            // older replays logged no heading: face the direction of travel
+      c.body.rotation.y = Math.atan2(next[1] - prev[1], next[0] - prev[0]) || c.body.rotation.y;
+    }
     const arr = c.trail.geometry.attributes.position.array;
     for (let s = 0; s < TRAIL; s++) {
       const src = c.q.p[Math.max(0, i - TRAIL + 1 + s)];

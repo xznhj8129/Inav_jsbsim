@@ -4,3 +4,4 @@ swarm_replay.json
 *_replay.html
 *.egg-info/
 build/
+.claude/

@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """A flock of INAV quads, each steered by an external swarm "brain" over GCS NAV.
 
-    python3 examples/swarm_flock.py /path/to/SITL.elf /path/to/swarming2.py [--count 6] [--minutes 3]
+    python3 examples/swarm_flock.py /path/to/SITL.elf /path/to/swarming2.py [--count 6] [--minutes 3] [--formation VEE]
 
 The chain, end to end:
 
   live METAR (KMOR, nearest to Sneedville)  ->  wind in every JSBSim sim
   N real INAV SITLs flying JSBSim F450s     ->  take off, hold in POSHOLD + GCS NAV
-  each drone's companion "brain"            ->  swarming2.Agent (unmodified), rescaled to quads
-  a simulated lossy radio (UDP hub)         ->  2 Hz beacons, range limit, packet loss: the
-                                                only way a brain learns where the others are
-  brain output -> MSP_SET_WP #255           ->  INAV's own nav flies each quad
+  each drone's companion "brain"            ->  swarming2.Agent, configured for copters, flocking
+                                                or holding a --formation
+  a simulated lossy radio (UDP hub)         ->  2 Hz beacons (the brain's own, carried as-is), range
+                                                limit, packet loss: the only way a brain learns where
+                                                the others are
+  brain velocity -> MSP_SET_WP #255         ->  placed where INAV's position P flies that velocity;
+                                                the nose follows the brain's slow-turning drive
   all MAVLink -> UDP 14550                  ->  QGroundControl shows the flock live
   end: RTH and land, then a replay file     ->  swarm_replay.json (see swarm_replay.py)
 
-The brain module is passed in by path; its Agent/Route classes are used as-is and
-only its tuning constants are rescaled from ~72 m/s aircraft to ~6 m/s quads.
+The brain module is passed in by path and switched to its copter profile.
 Needs pygame (the brain uses its Vector3) and network access for the METAR.
 """
 import argparse
@@ -33,7 +35,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from inavbench import HOME, Bench
-from inavbench.gcs import GCSNAV_AUX, M_PER_DEG_LON, gcs_addresses, set_target
+from inavbench.gcs import GCSNAV_AUX, M_PER_DEG_LON, gcs_addresses, pos_xy_gain, set_target, set_velocity
 from inavbench.mavudp import Relay
 from inavbench.metar import fetch_wind
 
@@ -43,29 +45,16 @@ BRAIN_HZ = 5.0
 BEACON_HZ = 2.0
 RADIO_RANGE_M = 250.0
 RADIO_LOSS = 0.15                 # fraction of beacons that never arrive
-NEIGHBOR_TIMEOUT_S = 3.0
-LEAD_S = 2.0                      # the #255 target sits this far ahead along the brain's velocity
 HUB_PORT = 47000
 QGC = ("127.0.0.1", 14550)
-SPEED_CLI = ["set nav_auto_speed = 700", "set nav_max_auto_speed = 900"]
-
-# swarming2 is tuned for ~72 m/s aircraft over kilometres; a quad does ~6 m/s over metres
-SCALE = 1.0 / 12.0
-SCALED = ["COLLISION_DISTANCE", "ROUTE_RADIUS_MIN", "ROUTE_RADIUS_MAX", "ROUTE_X_JITTER", "ROUTE_Y_JITTER",
-          "DESIRED_SPEED", "MIN_SPEED", "MAX_SPEED", "PHYSICAL_COMM_RANGE", "BRIDGE_NEIGHBOR_MIN_DISTANCE",
-          "NEIGHBOR_STABILITY_BONUS_METERS", "AHEAD_PRIORITY_METERS", "ROUTE_LOOKAHEAD_METERS", "WAYPOINT_RADIUS",
-          "CORRIDOR_DEADBAND", "CORRIDOR_FULL_PULL", "SPACING_HARD", "SPACING_MIN", "SPACING_COMFORT",
-          "SPACING_SOFT", "CENTROID_DEADBAND", "CENTROID_FULL_PULL", "FORMATION_SPEED_TRIM_DISTANCE"]
-ROUTE_ALT_M = (25.0, 45.0)        # relative to the launch pads
 
 
 def load_brain(path):
     spec = importlib.util.spec_from_file_location("swarm_brain", path)
     brain = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(brain)
-    for name in SCALED:
-        setattr(brain, name, getattr(brain, name) * SCALE)
-    brain.ROUTE_ALT_MIN, brain.ROUTE_ALT_MAX = ROUTE_ALT_M
+    brain.configure("copter")
+    brain.FORMATION, brain.FORMATION_SPACING = ARGS.formation, ARGS.spacing
     return brain
 
 
@@ -90,9 +79,13 @@ def fly(i, route_points, wind, ready, go, results):
     radio.bind(("127.0.0.1", HUB_PORT + sysid))
     radio.setblocking(False)
 
+    # INAV must not cap or soften the brain's velocity: speed limit at its V_MAX, no position expo
+    speed = round(brain.V_MAX * 100)
     with Bench("quad", sitl=ARGS.sitl, port=5760 + 10 * i, home=home,
-               cli=[f"set mavlink_sysid = {sysid}", GCSNAV_AUX, *SPEED_CLI]) as b:
+               cli=[f"set mavlink_sysid = {sysid}", GCSNAV_AUX, f"set nav_auto_speed = {speed}",
+                    f"set nav_max_auto_speed = {speed}", "set nav_mc_pos_expo = 0"]) as b:
         b.wind(*wind)
+        gain = pos_xy_gain(b)
 
         def pose():
             # the FC's own fused estimate: local NEU from its own origin (its pad), cm and cm/s
@@ -117,40 +110,41 @@ def fly(i, route_points, wind, ready, go, results):
 
         pos, vel = pose()
         me = brain.Agent(sysid, pos, vel)
-        heard = {}                              # sysid -> (Agent, last heard)
+        me.roster = list(range(1, ARGS.count + 1))
         log = []
         next_beacon = 0.0
-        end = time.monotonic() + ARGS.minutes * 60
+        last = time.monotonic()
+        end = last + ARGS.minutes * 60
         while time.monotonic() < end:
             b.run(1.0 / BRAIN_HZ)
             now = time.monotonic()
+            dt, last = now - last, now
             me.pos, me.vel = pose()
 
             if now >= next_beacon:
                 next_beacon = now + 1.0 / BEACON_HZ
-                radio.sendto(json.dumps({"id": sysid, "p": list(me.pos), "v": list(me.vel),
-                                         "s": me.segment_index}).encode(), ("127.0.0.1", HUB_PORT))
+                radio.sendto(json.dumps(me.beacon(now)).encode(), ("127.0.0.1", HUB_PORT))
             while True:
                 try:
-                    msg = json.loads(radio.recv(4096))
+                    me.hear(json.loads(radio.recv(4096)))   # beacon times are time.monotonic(): one machine
                 except BlockingIOError:
                     break
-                other = heard.get(msg["id"], (brain.Agent(msg["id"], V(msg["p"]), V(msg["v"])), 0))[0]
-                other.pos, other.vel, other.segment_index = V(msg["p"]), V(msg["v"]), msg["s"]
-                heard[msg["id"]] = (other, now)
-            heard = {k: v for k, v in heard.items() if now - v[1] < NEIGHBOR_TIMEOUT_S}
-            others = [a for a, _ in heard.values()]
+            peers = me.peers(now)
 
-            me.refresh_neighbors(others)
-            direction, speed = me.compute_control(me.active_neighbors({a.id: a for a in others}), route)
-            target = me.pos + direction * speed * LEAD_S
-            set_target(b, target.x, target.y, target.z, math.degrees(math.atan2(direction.x, direction.y)))
+            me.refresh_neighbors(peers)
+            cmd = me.compute_velocity(me.active_neighbors({p.id: p for p in peers}), route, dt)
+            alt = me.pos.z + cmd.z / brain.ALT_GAIN     # the route altitude, pushed by vertical repulsion
+            heading = math.degrees(math.atan2(me.drive_dir.x, me.drive_dir.y))
+            target = set_velocity(b, me.pos.x, me.pos.y, cmd.x, cmd.y, alt, heading, gain, 1.0 / BRAIN_HZ)
 
             t = b.truth()
-            log.append({"t": round(now, 2), "seg": me.segment_index, "n": sorted(heard),
+            log.append({"t": round(now, 2), "seg": me.segment_index, "n": sorted(p.id for p in peers),
                         "truth": [round(t["east_m"] + pad_e, 2), round(t["north_m"] + pad_n, 2), round(t["agl_m"], 2)],
-                        "fc": [round(c, 2) for c in me.pos], "target": [round(c, 2) for c in target],
-                        "emergency": round(me.emergency_level, 2)})
+                        "fc": [round(c, 2) for c in me.pos], "vel": [round(c, 2) for c in me.vel],
+                        "cmd": [round(c, 2) for c in cmd], "heading": round(heading, 1),
+                        "target": [round(c, 2) for c in target],
+                        "slot": me.slot, "emergency": round(me.emergency_level, 2),
+                        "slot_target": None if me.slot_target is None else [round(c, 2) for c in me.slot_target]})
 
         b.mode("NAV RTH")
         landed = b.run(150, until=lambda x: not x.fc.armed, check_every=0.5)
@@ -250,6 +244,8 @@ if __name__ == "__main__":
     args.add_argument("--count", type=int, default=6)
     args.add_argument("--minutes", type=float, default=3.0)
     args.add_argument("--seed", type=int, default=7)
+    args.add_argument("--formation", default="NONE", help="a swarming2 FORMATIONS name; NONE flocks")
+    args.add_argument("--spacing", type=float, default=10.0, help="formation slot spacing, m")
     args.add_argument("--gcs", action="append", default=[], metavar="HOST[:PORT]", help="also relay MAVLink here")
     ARGS = args.parse_args()
     ARGS.gcs_to = gcs_addresses(ARGS.gcs)

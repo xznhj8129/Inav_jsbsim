@@ -25,6 +25,7 @@ def compact(replay):
             "seg": [s["seg"] for s in log],
             "n": [s["n"] for s in log],
             "em": [s["emergency"] for s in log],
+            "hd": [s["heading"] for s in log] if "heading" in log[0] else None,     # older replays have none
         }
     links = [[round(t - t0, 2), a, b] for t, a, b in replay["links"]]
     errors = [math.dist(s["truth"][:2], s["fc"][:2]) for q in replay["quads"].values() for s in q["log"]]
