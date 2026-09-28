@@ -51,7 +51,3 @@ For UDP (QGroundControl's default 14550) or several vehicles at once: `python3 -
     - `quad_swarm.py`: four quads at once over UDP MAVLink
     - `swarm_flock.py`: a flock steered by an external swarm brain (`swarming2.py` in its copter profile) over GCS NAV, with `swarm_replay.py` for a 3D replay page
 - `old/` — superseded scripts from before this bench, kept for reference
-
-## Built on it
-
-- OPERATION CLINCH (its own repo, `clinch`): a system-of-systems exercise with six quads and the Cessna, a lossy mesh, a command post, and CoT to TAK.
