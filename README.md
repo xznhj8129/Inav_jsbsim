@@ -41,7 +41,7 @@ For UDP (QGroundControl's default 14550) or several vehicles at once: `python3 -
 
 ## Layout
 
-- `inavbench/` — the bench: `bench.py` (SITL, RC, modes, loop, FC queries), `vehicles.py` (JSBSim plant and vehicle definitions), `hitl.py` (MSP_SIMULATOR frames), `msp.py` (MSP + CLI), `mavudp.py` (MAVLink TCP-to-UDP relay), `selftest.py`
+- `inavbench/` — the bench: `bench.py` (SITL, RC, modes, loop, FC queries), `vehicles.py` (JSBSim plant and vehicle definitions; a `Vehicle` can load a model from outside JSBSim's bundled set with `model_dir`, and `tailsitter=True` hands INAV its sensors in the multirotor hover frame, since MSP_SIMULATOR bypasses INAV's tailsitter alignment), `hitl.py` (MSP_SIMULATOR frames), `msp.py` (MSP + CLI), `mavudp.py` (MAVLink TCP-to-UDP relay), `selftest.py`
 - `inavbench/profiles/` — INAV CLI config per vehicle, applied to a fresh eeprom on every start
 - `inavbench/gcs.py` — GCS NAV: move a vehicle's POSHOLD target (waypoint #255) from outside, or place it so a quad flies a given velocity; `inavbench/metar.py` — live METAR wind
 - `examples/` — run with the SITL path as the argument:

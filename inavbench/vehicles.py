@@ -27,6 +27,10 @@ class Vehicle:
     speed_kts: float = 0.0      # default start airspeed
     init: dict = field(default_factory=dict)   # extra JSBSim properties set at start
     known_errors: tuple = ()    # JSBSim error messages this model raises harmlessly
+    model_dir: str = ""         # directory with aircraft/<model>/ and engine/ for a model outside
+                                # JSBSim's bundled set; empty = bundled
+    tailsitter: bool = False    # body x is the nose and the thrust axis; INAV flies the multirotor
+                                # hover frame (see tailsitter_hover_frame)
 
 
 VEHICLES = {
@@ -54,6 +58,17 @@ VEHICLES = {
         init={"fcs/mixture-cmd-norm": 1.0},
     ),
 }
+
+
+def tailsitter_hover_frame(v):
+    """Body forward-left-up (x nose) -> the tailsitter's multirotor hover frame, forward-left-up with
+    forward = belly, up = nose. INAV's MSP_SIMULATOR writes acc/gyro/mag past its board alignment, so the
+    rotation tailsitter_orientation_offset applies to real sensors has to happen here."""
+    return (-v[2], v[1], v[0])
+
+
+def _body_frame(v):
+    return v
 
 
 class _ErrorsOnly(jsbsim.FGLogger):
@@ -95,6 +110,7 @@ class Plant:
     def __init__(self, vehicle, airborne=None, alt_m=None, speed_kts=None, heading_deg=0.0, home=HOME):
         self.vehicle = vehicle
         self.home = home
+        self._fc_frame = tailsitter_hover_frame if vehicle.tailsitter else _body_frame
         airborne = vehicle.airborne if airborne is None else airborne
         alt_m = (vehicle.alt_m if airborne else 0.0) if alt_m is None else alt_m
         speed_kts = (vehicle.speed_kts if airborne else 0.0) if speed_kts is None else speed_kts
@@ -102,7 +118,11 @@ class Plant:
         jsbsim.set_logger(_ErrorsOnly(vehicle.known_errors))
         self.fdm = f = jsbsim.FGFDMExec(None)
         f.set_debug_level(0)
-        f.load_model(vehicle.model)
+        if vehicle.model_dir:
+            f.set_aircraft_path(os.path.join(vehicle.model_dir, "aircraft"))
+            f.set_engine_path(os.path.join(vehicle.model_dir, "engine"))
+        if not f.load_model(vehicle.model):
+            raise RuntimeError(f"JSBSim could not load model {vehicle.model!r} (model_dir {vehicle.model_dir!r})")
         f.set_dt(self.DT)
         f["ic/lat-geod-deg"], f["ic/long-gc-deg"] = home
         f["ic/terrain-elevation-ft"] = 0.0
@@ -156,18 +176,18 @@ class Plant:
     def acc_mg(self):
         # specific force; JSBSim's is (Nx, Ny, -Nz) g in forward-right-down
         f = self.fdm
-        return (f["accelerations/Nx"] * 1000, -f["accelerations/Ny"] * 1000, f["accelerations/Nz"] * 1000)
+        return self._fc_frame((f["accelerations/Nx"] * 1000, -f["accelerations/Ny"] * 1000, f["accelerations/Nz"] * 1000))
 
     def static_acc_mg(self):
         """What the accelerometer reads with the vehicle held still at its current attitude."""
         f = self.fdm
         phi, theta = f["attitude/phi-rad"], f["attitude/theta-rad"]
-        return (math.sin(theta) * 1000, math.sin(phi) * math.cos(theta) * 1000, math.cos(phi) * math.cos(theta) * 1000)
+        return self._fc_frame((math.sin(theta) * 1000, math.sin(phi) * math.cos(theta) * 1000, math.cos(phi) * math.cos(theta) * 1000))
 
     def gyro_dps16(self):
         f = self.fdm
         p, q, r = (math.degrees(f[a]) * 16 for a in ("velocities/p-rad_sec", "velocities/q-rad_sec", "velocities/r-rad_sec"))
-        return (p, -q, -r)
+        return self._fc_frame((p, -q, -r))
 
     def baro_pa(self):
         return 101325.0 * (1.0 - 2.25577e-5 * self.fdm["position/h-sl-ft"] * FT) ** 5.25588
@@ -180,7 +200,7 @@ class Plant:
         north = (math.cos(theta) * math.cos(psi),
                  math.sin(phi) * math.sin(theta) * math.cos(psi) - math.cos(phi) * math.sin(psi),
                  math.cos(phi) * math.sin(theta) * math.cos(psi) + math.sin(phi) * math.sin(psi))
-        return (16000 * north[0], -16000 * north[1], -16000 * north[2])
+        return self._fc_frame((16000 * north[0], -16000 * north[1], -16000 * north[2]))
 
     def gps(self, fix=True):
         f = self.fdm
@@ -202,7 +222,10 @@ class Plant:
     def rangefinder_cm(self, max_m=10.0):
         """Distance along the body's down axis to flat ground, or -1 when out of range."""
         f = self.fdm
-        tilt = math.cos(f["attitude/phi-rad"]) * math.cos(f["attitude/theta-rad"])
+        if self.vehicle.tailsitter:     # hover-frame down is the body's tail direction
+            tilt = math.sin(f["attitude/theta-rad"])
+        else:
+            tilt = math.cos(f["attitude/phi-rad"]) * math.cos(f["attitude/theta-rad"])
         if tilt < 0.5:
             return -1
         d = f["position/h-agl-ft"] * FT / tilt
