@@ -157,6 +157,7 @@ class Bench:
         self.ticks = 0          # sim-loop ticks run so far
         self.motors = ()
         self.servos = ()
+        self.mixer_profile = None   # tailsitters: the FC's active mixer profile (0-based), read every tick
         self.hold = False       # True pins the vehicle in place (no physics, pure gravity)
         self.plant = None
         self.msp = None
@@ -165,7 +166,12 @@ class Bench:
     # --- lifecycle ------------------------------------------------------------------
 
     def __enter__(self):
-        self.start()
+        try:
+            self.start()
+        except BaseException:
+            # a failed start never reaches __exit__: stop the SITL it launched, keep its log and eeprom
+            self.stop(keep_workdir=True)
+            raise
         return self
 
     def __exit__(self, exc_type, *_):
@@ -296,6 +302,10 @@ class Bench:
         replies = self.msp.request_many(self._requests(frame))
         self.fc = hitl.unpack(replies[0])
         self.motors = _MOTORS.unpack(replies[1])
+        if self.vehicle.tailsitter:
+            # MSP2_INAV_STATUS ends with the active mixer profile; sensors follow it from the next tick
+            self.mixer_profile = replies[-1][-1]
+            p.hover_frame = self.mixer_profile == self.vehicle.hover_mixer_profile
         if self.vehicle.servos:
             self.servos = struct.unpack(f"<{len(replies[2]) // 2}H", replies[2])
         p.set_outputs(self.motors, self.servos)
@@ -312,6 +322,8 @@ class Bench:
         requests = [(hitl.MSP_SIMULATOR, frame), (MSP_MOTOR, b"")]
         if self.vehicle.servos:
             requests.append((MSP_SERVO, b""))
+        if self.vehicle.tailsitter:
+            requests.append((MSP2_INAV_STATUS, b""))
         return requests
 
     def release(self):

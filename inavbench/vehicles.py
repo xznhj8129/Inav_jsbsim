@@ -29,8 +29,9 @@ class Vehicle:
     known_errors: tuple = ()    # JSBSim error messages this model raises harmlessly
     model_dir: str = ""         # directory with aircraft/<model>/ and engine/ for a model outside
                                 # JSBSim's bundled set; empty = bundled
-    tailsitter: bool = False    # body x is the nose and the thrust axis; INAV flies the multirotor
-                                # hover frame (see tailsitter_hover_frame)
+    tailsitter: bool = False    # body x is the nose and the thrust axis; while INAV runs the hover
+                                # mixer profile, sensors go in the hover frame (see tailsitter_hover_frame)
+    hover_mixer_profile: int = 0  # INAV mixer profile index (0-based) flown in the hover frame
 
 
 VEHICLES = {
@@ -65,10 +66,6 @@ def tailsitter_hover_frame(v):
     forward = belly, up = nose. INAV's MSP_SIMULATOR writes acc/gyro/mag past its board alignment, so the
     rotation tailsitter_orientation_offset applies to real sensors has to happen here."""
     return (-v[2], v[1], v[0])
-
-
-def _body_frame(v):
-    return v
 
 
 class _ErrorsOnly(jsbsim.FGLogger):
@@ -110,7 +107,7 @@ class Plant:
     def __init__(self, vehicle, airborne=None, alt_m=None, speed_kts=None, heading_deg=0.0, home=HOME):
         self.vehicle = vehicle
         self.home = home
-        self._fc_frame = tailsitter_hover_frame if vehicle.tailsitter else _body_frame
+        self.hover_frame = vehicle.tailsitter   # the bench keeps this on the FC's active mixer profile
         airborne = vehicle.airborne if airborne is None else airborne
         alt_m = (vehicle.alt_m if airborne else 0.0) if alt_m is None else alt_m
         speed_kts = (vehicle.speed_kts if airborne else 0.0) if speed_kts is None else speed_kts
@@ -178,6 +175,9 @@ class Plant:
         f = self.fdm
         return self._fc_frame((f["accelerations/Nx"] * 1000, -f["accelerations/Ny"] * 1000, f["accelerations/Nz"] * 1000))
 
+    def _fc_frame(self, v):
+        return tailsitter_hover_frame(v) if self.hover_frame else v
+
     def static_acc_mg(self):
         """What the accelerometer reads with the vehicle held still at its current attitude."""
         f = self.fdm
@@ -222,7 +222,7 @@ class Plant:
     def rangefinder_cm(self, max_m=10.0):
         """Distance along the body's down axis to flat ground, or -1 when out of range."""
         f = self.fdm
-        if self.vehicle.tailsitter:     # hover-frame down is the body's tail direction
+        if self.hover_frame:            # hover-frame down is the body's tail direction
             tilt = math.sin(f["attitude/theta-rad"])
         else:
             tilt = math.cos(f["attitude/phi-rad"]) * math.cos(f["attitude/theta-rad"])
