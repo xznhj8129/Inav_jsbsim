@@ -30,7 +30,10 @@ MSP_BOXIDS = 119
 MSP_NAV_STATUS = 121
 MSP_MODE_RANGES = 34
 MSP2_INAV_STATUS = 0x2000
+MSP2_INAV_ANALOG = 0x2002
 MSP2_INAV_AIR_SPEED = 0x2009
+MSP2_INAV_MISC2 = 0x203A
+MSP_RAW_GPS = 106
 _MOTORS = struct.Struct("<8H")
 
 ARMING_BLOCKERS = {
@@ -119,20 +122,69 @@ LOG_HZ = 50
 SETTLE_S = 3.0       # streamed after start so HITL, baro calibration and the AHRS settle
 
 
+# What INAV reports, logged with log_fc=True: (MSP command, its reply's leading fields, then the columns they give)
+_ANALOG = struct.Struct("<BHhiIiiB")        # flags, V x100, A x100, W x100, mAh, mWh, remaining, percent
+_ALTITUDE = struct.Struct("<ihi")           # estimated altitude cm, climb cm/s, baro altitude cm
+_RAW_GPS = struct.Struct("<BBiihHHH")       # fix, sats, lat, lon, alt m, speed cm/s, course deg x10, hdop x100
+_NAV_STATUS = struct.Struct("<5B")          # mode, state, waypoint action, waypoint number, error
+_MISC2 = struct.Struct("<IIBB")             # on time s, flight time s, throttle %, navigation controls throttle
+_STATUS = struct.Struct("<HHHHBI")          # cycle us, i2c errors, sensors, cpu load %, profiles, arming flags; then modes, mixer profile
+FC_LOG_REQUESTS = (MSP2_INAV_STATUS, MSP2_INAV_ANALOG, MSP_ALTITUDE, MSP2_INAV_AIR_SPEED, MSP_RAW_GPS, MSP_NAV_STATUS, MSP2_INAV_MISC2)
+FC_LOG_FIELDS = (
+    "fc_stab_roll", "fc_stab_pitch", "fc_stab_yaw", "fc_stab_throttle",
+    "fc_battery_v", "fc_battery_a", "fc_battery_w", "fc_battery_mah", "fc_battery_wh", "fc_battery_pct", "fc_battery_state",
+    "fc_alt_m", "fc_climb_m_s", "fc_baro_alt_m", "fc_airspeed_m_s",
+    "fc_gps_fix", "fc_gps_sats", "fc_gps_alt_m", "fc_gps_speed_m_s", "fc_gps_course_deg",
+    "fc_nav_mode", "fc_nav_state", "fc_nav_wp", "fc_nav_error",
+    "fc_throttle_pct", "fc_auto_throttle", "fc_flight_time_s",
+    "fc_cycle_us", "fc_cpu_load_pct", "fc_arming_flags", "fc_mixer_profile",
+)
+
+
+def fc_telemetry(replies, stabilized, box_names):
+    """FC_LOG_FIELDS plus mode_<box> (1 = active) for every box INAV lists, from the FC_LOG_REQUESTS replies
+    (a dict by command) and the simulator reply's stabilised commands."""
+    flags, volts, amps, power, mah, mwh, _remaining, percent = _ANALOG.unpack_from(replies[MSP2_INAV_ANALOG])
+    alt, climb, baro_alt = _ALTITUDE.unpack_from(replies[MSP_ALTITUDE])
+    fix, sats, _lat, _lon, gps_alt, speed, course, _hdop = _RAW_GPS.unpack_from(replies[MSP_RAW_GPS])
+    nav_mode, nav_state, _wp_action, wp_number, nav_error = _NAV_STATUS.unpack_from(replies[MSP_NAV_STATUS])
+    _on_time, flight_time, throttle, auto_throttle = _MISC2.unpack_from(replies[MSP2_INAV_MISC2])
+    status = replies[MSP2_INAV_STATUS]
+    cycle, _i2c, _sensors, load, _profiles, arming = _STATUS.unpack_from(status)
+    modes = int.from_bytes(status[_STATUS.size:-1], "little")
+    values = (*stabilized, volts / 100.0, amps / 100.0, power / 100.0, mah, mwh / 1000.0, percent, flags >> 2 & 3,
+              alt / 100.0, climb / 100.0, baro_alt / 100.0, struct.unpack_from("<I", replies[MSP2_INAV_AIR_SPEED])[0] / 100.0,
+              fix, sats, gps_alt, speed / 100.0, course / 10.0,
+              nav_mode, nav_state, wp_number, nav_error,
+              throttle, auto_throttle, flight_time,
+              cycle, load, arming, status[-1] + 1)
+    telemetry = dict(zip(FC_LOG_FIELDS, values))
+    telemetry.update({mode_column(name): modes >> index & 1 for index, name in enumerate(box_names)})
+    return telemetry
+
+
+def mode_column(box_name):
+    return "mode_" + box_name.replace(" ", "_")
+
+
 class ArmingError(RuntimeError):
     pass
 
 
 class Bench:
     def __init__(self, vehicle, sitl, *, port=5760, workdir=None, cli=(), airborne=None, alt_m=None,
-                 speed_kts=None, heading_deg=0.0, home=HOME, log=None, pitot=False, rangefinder=False,
-                 rate_hz=RATE_HZ):
+                 speed_kts=None, heading_deg=0.0, home=HOME, log=None, log_extra=None, log_fc=False, battery=None,
+                 pitot=False, rangefinder=False, rate_hz=RATE_HZ):
         """vehicle: a key of VEHICLES ("quad", "plane") or a Vehicle.
         port: SITL's first TCP port; it takes one per UART, so space parallel benches 10 apart.
         cli: extra INAV CLI lines applied after the vehicle profile, e.g. your own diff.
         home: (lat, lon) start position; truth() north/east are measured from it.
         rate_hz: sim-loop ticks per second; None runs as fast as SITL answers (~850/s, twice the CPU).
-        log: CSV path for a per-run flight log (FC vs truth, RC, outputs)."""
+        log: CSV path for a per-run flight log (FC vs truth, RC, outputs).
+        log_extra: function(bench) -> {column: number}, called for every log row; its columns follow the standard ones.
+        log_fc: also log what INAV reports (FC_LOG_FIELDS and every flight mode), read over MSP on each log row.
+        battery: function(bench) -> (volts, amps) fed to INAV's battery voltage and current meters every tick (the
+            config needs feature VBAT and feature CURRENT_METER); None leaves INAV on a simulated full 3S pack."""
         self.vehicle = VEHICLES[vehicle] if isinstance(vehicle, str) else vehicle
         self.sitl = os.path.abspath(sitl)
         self.port = port
@@ -145,6 +197,10 @@ class Bench:
         self.use_pitot = pitot
         self.use_rangefinder = rangefinder
         self.log_path = log
+        self.log_extra = log_extra
+        self.log_fc = log_fc
+        self.battery = battery
+        self.fc_telemetry = {}  # the last FC_LOG_FIELDS and mode columns read (log_fc)
         self._period = 1.0 / rate_hz if rate_hz else 0.0
         self._own_workdir = workdir is None
         self.workdir = workdir or tempfile.mkdtemp(prefix="inavbench-")
@@ -298,16 +354,21 @@ class Bench:
             acc, gyro = p.acc_mg(), p.gyro_dps16()
         frame = hitl.pack(flags, acc, gyro, p.baro_pa(), p.mag(), self.rc, gps=gps,
                           airspeed_cms=p.airspeed_cms() if self.use_pitot else None,
-                          rangefinder_cm=p.rangefinder_cm() if self.use_rangefinder else None)
-        replies = self.msp.request_many(self._requests(frame))
-        self.fc = hitl.unpack(replies[0])
-        self.motors = _MOTORS.unpack(replies[1])
+                          rangefinder_cm=p.rangefinder_cm() if self.use_rangefinder else None,
+                          battery=self.battery(self) if self.battery else None)
+        fc_log_due = self.log_fc and getattr(self, "_log_file", None) and now >= self._next_log
+        requests = self._requests(frame, fc_log_due)
+        replies = dict(zip((cmd for cmd, _ in requests), self.msp.request_many(requests)))
+        self.fc = hitl.unpack(replies[hitl.MSP_SIMULATOR])
+        self.motors = _MOTORS.unpack(replies[MSP_MOTOR])
         if self.vehicle.tailsitter:
             # MSP2_INAV_STATUS ends with the active mixer profile; sensors follow it from the next tick
-            self.mixer_profile = replies[-1][-1]
+            self.mixer_profile = replies[MSP2_INAV_STATUS][-1]
             p.hover_frame = self.mixer_profile == self.vehicle.hover_mixer_profile
         if self.vehicle.servos:
-            self.servos = struct.unpack(f"<{len(replies[2]) // 2}H", replies[2])
+            self.servos = struct.unpack(f"<{len(replies[MSP_SERVO]) // 2}H", replies[MSP_SERVO])
+        if fc_log_due:
+            self.fc_telemetry = fc_telemetry(replies, self.fc.stabilized, self._box_names)
         p.set_outputs(self.motors, self.servos)
         self._log_row(now)
 
@@ -318,11 +379,13 @@ class Bench:
             if delay > 0:
                 time.sleep(delay)
 
-    def _requests(self, frame):
+    def _requests(self, frame, fc_log):
         requests = [(hitl.MSP_SIMULATOR, frame), (MSP_MOTOR, b"")]
         if self.vehicle.servos:
             requests.append((MSP_SERVO, b""))
-        if self.vehicle.tailsitter:
+        if fc_log:
+            requests += [(cmd, b"") for cmd in FC_LOG_REQUESTS]
+        elif self.vehicle.tailsitter:
             requests.append((MSP2_INAV_STATUS, b""))
         return requests
 
@@ -427,10 +490,13 @@ class Bench:
         self._log_file = open(self.log_path, "w", newline="")
         self._log = csv.writer(self._log_file)
         self._log_fields = list(self.plant.truth())
+        self._extra_fields = list(self.log_extra(self)) if self.log_extra else []
+        self._fc_fields = [*FC_LOG_FIELDS, *map(mode_column, self._box_names)] if self.log_fc else []
         self._log.writerow(["t", "armed", "fc_roll", "fc_pitch", "fc_yaw", *self._log_fields,
                             *(f"rc{i + 1}" for i in range(8)),
                             *(f"motor{i + 1}" for i in range(len(self.vehicle.motors))),
-                            *(f"servo{i}" for i in range(len(self.vehicle.servos)))])
+                            *(f"servo{i}" for i in range(len(self.vehicle.servos))),
+                            *self._fc_fields, *self._extra_fields])
         self._next_log = 0.0
 
     def _log_row(self, now):
@@ -441,4 +507,12 @@ class Bench:
         self._log.writerow([f"{now - self._t0:.3f}", int(self.fc.armed), self.fc.roll, self.fc.pitch, self.fc.yaw,
                             *(f"{t[k]:.7f}" if k in ("lat", "lon") else f"{t[k]:.3f}" for k in self._log_fields),
                             *self.rc, *self.motors[:len(self.vehicle.motors)],
-                            *self.servos[:len(self.vehicle.servos)]])
+                            *self.servos[:len(self.vehicle.servos)],
+                            *(self.fc_telemetry.get(key, "") for key in self._fc_fields),
+                            *(f"{value:.4f}" for value in self._extra_values())])
+
+    def _extra_values(self):
+        if not self._extra_fields:
+            return []
+        extra = self.log_extra(self)
+        return [extra[key] for key in self._extra_fields]

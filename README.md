@@ -33,6 +33,8 @@ with Bench("quad", sitl="/path/to/SITL.elf") as b:
     print(b.truth(), b.fc, b.active_modes())
 ```
 
+`Bench(..., log="run.csv")` writes a flight log (FC attitude vs truth, RC, outputs). `log_fc=True` adds what INAV reports over MSP each log row (battery, altitude estimate, GPS, navigation state, throttle, load, every flight mode); `log_extra=fn` adds your own columns; `battery=fn` feeds INAV's battery voltage and current meters every tick (the config needs `feature VBAT` and `feature CURRENT_METER`; at most 25.5 V).
+
 ## Watch from a GCS
 
 While a script runs, connect QGroundControl (TCP, `127.0.0.1:5762`, MAVLink) or INAV Configurator (TCP, `127.0.0.1:5761`, MSP). The bench prints both when it starts.
