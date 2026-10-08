@@ -18,7 +18,7 @@ import tempfile
 import time
 
 from . import hitl
-from .msp import Msp
+from .msp import Msp, MspError
 from .vehicles import HOME, PROFILES, VEHICLES, Plant
 
 MSP_SERVO = 103
@@ -34,6 +34,7 @@ MSP2_INAV_ANALOG = 0x2002
 MSP2_INAV_AIR_SPEED = 0x2009
 MSP2_INAV_MISC2 = 0x203A
 MSP_RAW_GPS = 106
+MSP2_COMMON_SETTING = 0x1003
 _MOTORS = struct.Struct("<8H")
 
 ARMING_BLOCKERS = {
@@ -250,7 +251,9 @@ class Bench:
             cwd=self.workdir, stdout=self._sitl_log, stderr=subprocess.STDOUT, start_new_session=True)
 
         msp = self._connect()
-        msp.cli(self._profile_lines())
+        # INAV with explicit MAVLink port binding refuses to arm while UART3's MAVLink port has no slot
+        bind_mavlink = self._has_setting(msp, "mavlink_port1_serial")
+        msp.cli(self._profile_lines(bind_mavlink))
         msp.cli_save()          # reboots the SITL into the new config
         self.msp = self._connect()
         print(f"GCS: MSP on tcp://127.0.0.1:{self.gcs_msp_port}, MAVLink on tcp://127.0.0.1:{self.gcs_mavlink_port}")
@@ -283,7 +286,15 @@ class Bench:
         elif self._own_workdir:
             shutil.rmtree(self.workdir, ignore_errors=True)
 
-    def _profile_lines(self):
+    @staticmethod
+    def _has_setting(msp, name):
+        try:
+            msp.request(MSP2_COMMON_SETTING, name.encode() + b"\0")
+        except MspError:
+            return False
+        return True
+
+    def _profile_lines(self, bind_mavlink):
         with open(os.path.join(PROFILES, self.vehicle.profile)) as f:
             lines = [ln.split("#", 1)[0].strip() for ln in f]
         # SITL maps UART n to TCP port base + n - 1. UART1 is the bench's own link;
@@ -292,6 +303,8 @@ class Bench:
                   "serial 2 256 115200 115200 115200 115200",  # UART3: MAVLink
                   "feature TELEMETRY",                         # MAVLink is only sent with it on
                   "set mavlink_autopilot_type = ARDUPILOT"]    # what GCSs (QGC) handle properly
+        if bind_mavlink:
+            lines.append("set mavlink_port1_serial = 2")         # UART3 in the serial command's numbering
         # INAV only takes HITL airspeed / rangefinder data into a configured sensor
         if self.use_pitot:
             lines.append("set pitot_hardware = FAKE")
