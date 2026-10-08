@@ -174,12 +174,14 @@ class ArmingError(RuntimeError):
 class Bench:
     def __init__(self, vehicle, sitl, *, port=5760, workdir=None, cli=(), airborne=None, alt_m=None,
                  speed_kts=None, heading_deg=0.0, home=HOME, log=None, log_extra=None, log_fc=False, battery=None,
-                 pitot=False, rangefinder=False, rate_hz=RATE_HZ):
+                 pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False):
         """vehicle: a key of VEHICLES ("quad", "plane") or a Vehicle.
         port: SITL's first TCP port; it takes one per UART, so space parallel benches 10 apart.
         cli: extra INAV CLI lines applied after the vehicle profile, e.g. your own diff.
         home: (lat, lon) start position; truth() north/east are measured from it.
         rate_hz: sim-loop ticks per second; None runs as fast as SITL answers (~850/s, twice the CPU).
+        stepped: drive SITL's clock (needs a SITL with the stepped clock): every tick carries a 1/rate_hz step that
+            SITL runs before replying, so flight time is sim time and runs as fast as the two processes can go.
         log: CSV path for a per-run flight log (FC vs truth, RC, outputs).
         log_extra: function(bench) -> {column: number}, called for every log row; its columns follow the standard ones.
         log_fc: also log what INAV reports (FC_LOG_FIELDS and every flight mode), read over MSP on each log row.
@@ -201,7 +203,11 @@ class Bench:
         self.log_fc = log_fc
         self.battery = battery
         self.fc_telemetry = {}  # the last FC_LOG_FIELDS and mode columns read (log_fc)
+        if stepped and not rate_hz:
+            raise ValueError("stepped needs a rate_hz: it sets the step")
         self._period = 1.0 / rate_hz if rate_hz else 0.0
+        self.stepped = stepped
+        self._sim_t = 0.0       # flight time on the stepped clock, s
         self._own_workdir = workdir is None
         self.workdir = workdir or tempfile.mkdtemp(prefix="inavbench-")
 
@@ -253,7 +259,7 @@ class Bench:
         self._wait_boot_calibration()
         self.plant = Plant(self.vehicle, **self.start_state)
         self.hold = self.airborne
-        self._t_last = time.monotonic()
+        self._t_last = self._now()
         self._next_gps = 0.0
         self._t0 = self._t_last
         self._next_tick = self._t_last
@@ -321,25 +327,32 @@ class Bench:
 
     # --- the loop -------------------------------------------------------------------
 
+    def _now(self):
+        """Flight time: the stepped clock's when stepped, wall time otherwise."""
+        return self._sim_t if self.stepped else time.monotonic()
+
     def run(self, seconds, until=None, check_every=0.05):
-        """Fly for `seconds` of wall time. `until(bench)` ends it early by returning True;
+        """Fly for `seconds` of flight time. `until(bench)` ends it early by returning True;
         it is checked every `check_every` s. Returns True if `until` fired."""
-        end = time.monotonic() + seconds
+        end = self._now() + seconds
         next_check = 0.0
-        while time.monotonic() < end:
+        while self._now() < end:
             self._tick()
-            if until is not None and time.monotonic() >= next_check:
-                next_check = time.monotonic() + check_every
+            if until is not None and self._now() >= next_check:
+                next_check = self._now() + check_every
                 if until(self):
                     return True
         return False
 
     def _tick(self):
         self.ticks += 1
-        now = time.monotonic()
+        if self.stepped:
+            # the FC ran the last step with the last outputs; its next one starts here
+            self._sim_t += self._period
+        now = self._now()
         p = self.plant
         if not self.hold:
-            # advance by the full wall-clock gap: the FC kept running with the last outputs
+            # advance by the full gap: the FC kept running with the last outputs
             p.advance(now - self._t_last)
         self._t_last = now
 
@@ -355,11 +368,14 @@ class Bench:
         frame = hitl.pack(flags, acc, gyro, p.baro_pa(), p.mag(), self.rc, gps=gps,
                           airspeed_cms=p.airspeed_cms() if self.use_pitot else None,
                           rangefinder_cm=p.rangefinder_cm() if self.use_rangefinder else None,
-                          battery=self.battery(self) if self.battery else None)
+                          battery=self.battery(self) if self.battery else None,
+                          step_us=round(self._period * 1e6) if self.stepped else None)
         fc_log_due = self.log_fc and getattr(self, "_log_file", None) and now >= self._next_log
         requests = self._requests(frame, fc_log_due)
         replies = dict(zip((cmd for cmd, _ in requests), self.msp.request_many(requests)))
         self.fc = hitl.unpack(replies[hitl.MSP_SIMULATOR])
+        if self.stepped and not self.fc.stepped:
+            raise RuntimeError("SITL did not take the step: this build has no stepped clock")
         self.motors = _MOTORS.unpack(replies[MSP_MOTOR])
         if self.vehicle.tailsitter:
             # MSP2_INAV_STATUS ends with the active mixer profile; sensors follow it from the next tick
@@ -372,7 +388,7 @@ class Bench:
         p.set_outputs(self.motors, self.servos)
         self._log_row(now)
 
-        if self._period:
+        if self._period and not self.stepped:
             # hold the tick rate: sleep off what is left of this tick
             self._next_tick = max(self._next_tick + self._period, now)
             delay = self._next_tick - time.monotonic()
@@ -392,11 +408,11 @@ class Bench:
     def release(self):
         """Let physics take over after a held (airborne) start."""
         self.hold = False
-        self._t_last = time.monotonic()
+        self._t_last = self._now()
 
     @property
     def elapsed(self):
-        return time.monotonic() - self._t0
+        return self._now() - self._t0
 
     # --- pilot inputs ---------------------------------------------------------------
 

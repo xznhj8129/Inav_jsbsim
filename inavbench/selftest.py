@@ -1,6 +1,9 @@
 """Check the bench itself against a SITL build: sensors, outputs and nav all line up.
 
-    python3 -m inavbench.selftest /path/to/inav/build_sitl/bin/SITL.elf [quad|plane]
+    python3 -m inavbench.selftest /path/to/inav/build_sitl/bin/SITL.elf [quad|plane] [--stepped] [--rate=HZ]
+
+--stepped flies on SITL's stepped clock (Bench(stepped=True)) instead of wall time.
+--rate sets the bench's tick rate (Bench(rate_hz=...)); stepped, each tick is a 1/HZ step.
 
 This tests the bench, not a firmware feature. Run it when you switch firmware
 or change the bench; if it fails, fix that before trusting any other result.
@@ -8,8 +11,9 @@ or change the bench; if it fails, fix that before trusting any other result.
 import math
 import statistics
 import sys
+import time
 
-from .bench import Bench
+from .bench import RATE_HZ, Bench
 
 
 def _angle_diff(a, b):
@@ -26,9 +30,9 @@ def _from_home(b):
     return math.hypot(t["north_m"], t["east_m"])
 
 
-def quad(sitl):
+def quad(sitl, stepped, rate_hz):
     checks = []
-    with Bench("quad", sitl=sitl) as b:
+    with Bench("quad", sitl=sitl, stepped=stepped, rate_hz=rate_hz) as b:
         b.mode("ANGLE")
         b.arm()
         b.sticks(throttle=0.62)
@@ -65,9 +69,9 @@ def quad(sitl):
     return checks
 
 
-def plane(sitl):
+def plane(sitl, stepped, rate_hz):
     checks = []
-    with Bench("plane", sitl=sitl) as b:
+    with Bench("plane", sitl=sitl, stepped=stepped, rate_hz=rate_hz) as b:
         b.mode("ANGLE")
         b.arm()
         b.sticks(throttle=0.7)
@@ -99,13 +103,18 @@ def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     sitl = sys.argv[1]
-    which = sys.argv[2:] or ["quad", "plane"]
+    options = [arg for arg in sys.argv[2:] if arg.startswith("--")]
+    stepped = "--stepped" in options
+    rate_hz = next((int(arg.split("=", 1)[1]) for arg in options if arg.startswith("--rate=")), RATE_HZ)
+    which = [arg for arg in sys.argv[2:] if not arg.startswith("--")] or ["quad", "plane"]
     ok = True
     for name in which:
-        print(f"--- {name}")
-        for text, passed in {"quad": quad, "plane": plane}[name](sitl):
+        print(f"--- {name} at {rate_hz} Hz" + (" (stepped clock)" if stepped else ""))
+        started = time.monotonic()
+        for text, passed in {"quad": quad, "plane": plane}[name](sitl, stepped, rate_hz):
             print(("PASS " if passed else "FAIL ") + text)
             ok &= passed
+        print(f"     {time.monotonic() - started:.1f} s wall")
     print("SELFTEST " + ("PASS" if ok else "FAIL"))
     sys.exit(0 if ok else 1)
 
