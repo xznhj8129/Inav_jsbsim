@@ -18,12 +18,16 @@ feature GPS
 set gps_provider = MSP
 set init_gyro_cal = OFF              # no real gyro behind HITL; boot calibration would never finish
 
-# nav: INAV's fixed-wing defaults, which are sized for an RC plane like this one
+# nav: INAV's fixed-wing defaults, which are sized for an RC plane like this one.
+# Launch with the motor already idling: the model's electric motor delivers constant power at any speed, so
+# starting the prop from standstill gives a torque spike (power / prop speed) that rolls the plane over.
+set nav_fw_launch_idle_thr = 1150
 
-# switches: AUX1 arm, AUX2 angle, AUX3 mid althold / high poshold (loiter), AUX4 mid RTH / high WP
+# switches: AUX1 arm, AUX2 mid angle / high angle + launch, AUX3 mid althold / high poshold (loiter), AUX4 mid RTH / high WP
 aux 0 0 0 1700 2100
 aux 1 1 1 1300 2100
 aux 2 3 2 1300 1700
 aux 3 11 2 1700 2100
 aux 4 10 3 1300 1700
 aux 5 28 3 1700 2100
+aux 6 36 1 1800 2100

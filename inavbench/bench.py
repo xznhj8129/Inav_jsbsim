@@ -175,12 +175,13 @@ class ArmingError(RuntimeError):
 class Bench:
     def __init__(self, vehicle, sitl, *, port=5760, workdir=None, cli=(), airborne=None, alt_m=None,
                  speed_kts=None, heading_deg=0.0, home=HOME, log=None, log_extra=None, log_fc=False, battery=None,
-                 pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False):
+                 pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False, catapult=None):
         """vehicle: a key of VEHICLES ("quad", "plane") or a Vehicle.
         port: SITL's first TCP port; it takes one per UART, so space parallel benches 10 apart.
         cli: extra INAV CLI lines applied after the vehicle profile, e.g. your own diff.
         home: (lat, lon) start position; truth() north/east are measured from it.
         rate_hz: sim-loop ticks per second; None runs as fast as SITL answers (~850/s, twice the CPU).
+        catapult: a vehicles.Catapult to start on, held still until launch() fires it (overrides airborne/alt/speed).
         stepped: drive SITL's clock (needs a SITL with the stepped clock): every tick carries a 1/rate_hz step that
             SITL runs before replying, so flight time is sim time and runs as fast as the two processes can go.
         log: CSV path for a per-run flight log (FC vs truth, RC, outputs).
@@ -196,7 +197,7 @@ class Bench:
         self.extra_cli = list(cli)
         self.airborne = self.vehicle.airborne if airborne is None else airborne
         self.start_state = dict(airborne=self.airborne, alt_m=alt_m, speed_kts=speed_kts, heading_deg=heading_deg,
-                                home=home)
+                                home=home, catapult=catapult)
         self.use_pitot = pitot
         self.use_rangefinder = rangefinder
         self.log_path = log
@@ -261,7 +262,8 @@ class Bench:
         self._read_modes()
         self._wait_boot_calibration()
         self.plant = Plant(self.vehicle, **self.start_state)
-        self.hold = self.airborne
+        # an airborne start is pinned in place until release(); on a catapult JSBSim runs and the catapult holds it
+        self.hold = self.airborne and not self.plant.catapult
         self._t_last = self._now()
         self._next_gps = 0.0
         self._t0 = self._t_last
@@ -417,6 +419,10 @@ class Bench:
         elif self.vehicle.tailsitter:
             requests.append((MSP2_INAV_STATUS, b""))
         return requests
+
+    def launch(self):
+        """Fire the catapult the vehicle started on (Bench(catapult=...))."""
+        self.plant.launch()
 
     def release(self):
         """Let physics take over after a held (airborne) start."""

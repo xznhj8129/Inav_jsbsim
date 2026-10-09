@@ -14,6 +14,7 @@ import sys
 import time
 
 from .bench import RATE_HZ, Bench
+from .vehicles import VEHICLES
 
 
 def _angle_diff(a, b):
@@ -69,13 +70,41 @@ def quad(sitl, stepped, rate_hz):
     return checks
 
 
+# MSP_NAV_STATUS state while INAV's RTH lands, and once it has landed (navigation.h, MW_NAV_STATE_*)
+NAV_STATE_LAND_IN_PROGRESS, NAV_STATE_LANDED = 9, 10
+
+
+def _rth_end(b):
+    """RTH ends either still flying or landed by INAV (nav_rth_allow_landing) near home; a crash already
+    stopped the bench with GroundStrike."""
+    agl, state = b.truth()["agl_m"], b.nav_status()["state"]
+    if state in (NAV_STATE_LAND_IN_PROGRESS, NAV_STATE_LANDED) and agl < 1.0:
+        landed_at = _from_home(b)
+        return (f"RTH landed it {landed_at:.0f} m from home", landed_at < 200)
+    return (f"still flying ({agl:.0f} m above ground)", agl > 50)
+
+
 def plane(sitl, stepped, rate_hz, vehicle="plane"):
+    """A vehicle with a default launcher takes off from it in NAV LAUNCH; the rest start in the air."""
     checks = []
-    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz) as b:
-        b.mode("ANGLE")
-        b.arm()
-        b.sticks(throttle=0.7)
-        b.release()
+    catapult = VEHICLES[vehicle].launcher
+    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz, catapult=catapult) as b:
+        if catapult:
+            b.mode("NAV LAUNCH")
+            b.arm()
+            b.sticks(throttle=0.7)
+            b.run(2)            # INAV spins the motor up to its launch idle before it looks for the throw
+            b.launch()
+            b.run(6)
+            agl = b.truth()["agl_m"]
+            checks.append((f"catapult launch climbed out ({agl:.0f} m after 6 s)", agl > 15))
+            b.mode("NAV LAUNCH", on=False)
+            b.mode("ANGLE")
+        else:
+            b.mode("ANGLE")
+            b.arm()
+            b.sticks(throttle=0.7)
+            b.release()
         worst = 0.0
         for stick in (0.0, 0.5, 0.0, -0.5, 0.0):
             b.sticks(roll=stick)
@@ -95,7 +124,7 @@ def plane(sitl, stepped, rate_hz, vehicle="plane"):
             closest = min(closest, _from_home(b))
         checks += [(f"flew away ({away:.0f} m)", away > 800),
                    (f"RTH came back within 200 m of home (closest {closest:.0f} m)", closest < 200),
-                   ("still flying", b.truth()["agl_m"] > 50)]
+                   _rth_end(b)]
     return checks
 
 
