@@ -13,6 +13,7 @@ import jsbsim
 FT = 0.3048
 HOME = (36.530440, -83.216383)          # Sneedville, TN
 PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
+MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,17 @@ VEHICLES = {
         alt_m=450.0,
         speed_kts=70.0,
         init={"fcs/mixture-cmd-norm": 1.0},
+    ),
+    # ArduPilot's Rascal 110 RC trainer (inavbench/models), electric. Servo 0/1/2 = aileron/elevator/rudder.
+    "rascal": Vehicle(
+        model="Rascal",
+        profile="plane_rascal.cli",
+        motors=("fcs/throttle-cmd-norm",),
+        servos=("fcs/aileron-cmd-norm", "fcs/elevator-cmd-norm", "fcs/rudder-cmd-norm"),
+        airborne=True,
+        alt_m=150.0,
+        speed_kts=35.0,
+        model_dir=MODELS,
     ),
 }
 

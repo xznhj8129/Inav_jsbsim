@@ -69,9 +69,9 @@ def quad(sitl, stepped, rate_hz):
     return checks
 
 
-def plane(sitl, stepped, rate_hz):
+def plane(sitl, stepped, rate_hz, vehicle="plane"):
     checks = []
-    with Bench("plane", sitl=sitl, stepped=stepped, rate_hz=rate_hz) as b:
+    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz) as b:
         b.mode("ANGLE")
         b.arm()
         b.sticks(throttle=0.7)
@@ -111,7 +111,8 @@ def main():
     for name in which:
         print(f"--- {name} at {rate_hz} Hz" + (" (stepped clock)" if stepped else ""))
         started = time.monotonic()
-        for text, passed in {"quad": quad, "plane": plane}[name](sitl, stepped, rate_hz):
+        tests = {"quad": quad, "plane": plane, "rascal": lambda *a: plane(*a, vehicle="rascal")}
+        for text, passed in tests[name](sitl, stepped, rate_hz):
             print(("PASS " if passed else "FAIL ") + text)
             ok &= passed
         print(f"     {time.monotonic() - started:.1f} s wall")
