@@ -9,8 +9,10 @@
         print(b.truth(), b.fc)
 """
 import csv
+import ctypes
 import os
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -172,6 +174,19 @@ class ArmingError(RuntimeError):
     pass
 
 
+_PR_SET_PDEATHSIG = 1
+
+
+def _die_with_parent(parent_pid):
+    """Runs in the SITL child before exec: Linux sends it SIGTERM when the bench process dies, however it
+    dies, so a killed bench never leaves SITL running. If the bench is already gone, stop here."""
+    def setup():
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
+        if os.getppid() != parent_pid:
+            os._exit(1)
+    return setup
+
+
 class Bench:
     def __init__(self, vehicle, sitl, *, port=5760, workdir=None, cli=(), airborne=None, alt_m=None,
                  speed_kts=None, heading_deg=0.0, home=HOME, log=None, log_extra=None, log_fc=False, battery=None,
@@ -249,7 +264,8 @@ class Bench:
         self._sitl_log = open(os.path.join(self.workdir, "sitl.log"), "w")
         self._proc = subprocess.Popen(
             [self.sitl, f"--path={eeprom}", f"--tcpbaseport={self.port}"],
-            cwd=self.workdir, stdout=self._sitl_log, stderr=subprocess.STDOUT, start_new_session=True)
+            cwd=self.workdir, stdout=self._sitl_log, stderr=subprocess.STDOUT, start_new_session=True,
+            preexec_fn=_die_with_parent(os.getpid()) if sys.platform.startswith("linux") else None)
 
         msp = self._connect()
         # INAV with explicit MAVLink port binding refuses to arm while UART3's MAVLink port has no slot
