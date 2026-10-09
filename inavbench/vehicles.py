@@ -5,15 +5,15 @@ in profiles/, and the JSBSim property each INAV motor/servo output drives.
 """
 import math
 import os
-import shutil
 import sys
 import tempfile
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 import jsbsim
 
-FT = 0.3048
+from .launchers import Catapult, LaunchRail, Rail, launcher_model
+from .units import FT
+
 HOME = (36.530440, -83.216383)          # Sneedville, TN
 PROFILES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profiles")
 MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -24,22 +24,6 @@ GROUND_STRIKE_FT = -0.5 / FT    # below this the airframe is in the ground: only
 
 class GroundStrike(RuntimeError):
     """The vehicle is in the ground: past here JSBSim's state is meaningless."""
-
-
-@dataclass(frozen=True)
-class Catapult:
-    """A perfect launcher: the vehicle sits still on it at pitch_deg, height_m above the ground, until launch(),
-    then runs along it, attitude locked and nothing but straight-line motion, at constant acceleration to
-    speed_ms over length_m. Works for any vehicle: JSBSim runs throughout, pushed by a `catapult` external
-    force the bench adds to a copy of the model (catapult_model)."""
-    pitch_deg: float = 10.0
-    length_m: float = 2.0
-    speed_ms: float = 15.0
-    height_m: float = 1.5
-
-    @property
-    def stroke_s(self):
-        return 2.0 * self.length_m / self.speed_ms
 
 
 @dataclass(frozen=True)
@@ -59,7 +43,7 @@ class Vehicle:
     tailsitter: bool = False    # body x is the nose and the thrust axis; while INAV runs the hover
                                 # mixer profile, sensors go in the hover frame (see tailsitter_hover_frame)
     hover_mixer_profile: int = 0  # INAV mixer profile index (0-based) flown in the hover frame
-    launcher: "Catapult | None" = None  # the catapult it launches from by default (tests, scenarios); None = no default
+    launcher: "Catapult | LaunchRail | None" = None  # what it launches from by default (tests, scenarios); None = none
 
 
 VEHICLES = {
@@ -99,26 +83,6 @@ VEHICLES = {
         launcher=Catapult(),
     ),
 }
-
-
-def catapult_model(vehicle, into):
-    """Copy the vehicle's aircraft folder into `into` and add the catapult external force to the copy's model.
-    Returns (aircraft path, engine path) for JSBSim."""
-    root = vehicle.model_dir or jsbsim.get_default_root_dir()
-    aircraft = os.path.join(into, "aircraft")
-    shutil.copytree(os.path.join(root, "aircraft", vehicle.model), os.path.join(aircraft, vehicle.model))
-    path = os.path.join(aircraft, vehicle.model, vehicle.model + ".xml")
-    tree = ET.parse(path)
-    reactions = tree.getroot().find("external_reactions")
-    if reactions is None:
-        reactions = ET.SubElement(tree.getroot(), "external_reactions")
-    # direction and magnitude are set every step (Plant._rail_force); it acts through the CG (set at load)
-    force = ET.SubElement(reactions, "force", name="catapult", frame="BODY")
-    location = ET.SubElement(force, "location", unit="IN")
-    for axis in "xyz":
-        ET.SubElement(location, axis).text = "0"
-    tree.write(path)
-    return aircraft, os.path.join(root, "engine")
 
 
 def tailsitter_hover_frame(v):
@@ -163,16 +127,13 @@ class Plant:
     """JSBSim flying one Vehicle, converted to and from INAV's HITL units."""
 
     DT = 0.001
-    RAIL_GAIN = 50.0    # 1/s: how hard the rail pulls the velocity back onto its profile
-    _ROTATION_INTEGRATORS = ("simulation/integrator/rate/rotational", "simulation/integrator/position/rotational")
 
-    def __init__(self, vehicle, airborne=None, alt_m=None, speed_kts=None, heading_deg=0.0, home=HOME, catapult=None):
+    def __init__(self, vehicle, airborne=None, alt_m=None, speed_kts=None, heading_deg=0.0, home=HOME, launcher=None):
         self.vehicle = vehicle
         self.home = home
         self.hover_frame = vehicle.tailsitter   # the bench keeps this on the FC's active mixer profile
-        self.catapult = catapult
-        if catapult:
-            airborne, alt_m, speed_kts = True, catapult.height_m, 0.0
+        if launcher:
+            airborne, alt_m, speed_kts = True, launcher.height_m, 0.0
         airborne = vehicle.airborne if airborne is None else airborne
         alt_m = (vehicle.alt_m if airborne else 0.0) if alt_m is None else alt_m
         speed_kts = (vehicle.speed_kts if airborne else 0.0) if speed_kts is None else speed_kts
@@ -180,9 +141,9 @@ class Plant:
         jsbsim.set_logger(_ErrorsOnly(vehicle.known_errors))
         self.fdm = f = jsbsim.FGFDMExec(None)
         f.set_debug_level(0)
-        if catapult:
-            self._catapult_dir = tempfile.TemporaryDirectory(prefix="inavbench-catapult-")
-            aircraft_path, engine_path = catapult_model(vehicle, self._catapult_dir.name)
+        if launcher:
+            self._launcher_dir = tempfile.TemporaryDirectory(prefix="inavbench-launcher-")
+            aircraft_path, engine_path = launcher_model(vehicle.model, vehicle.model_dir, self._launcher_dir.name)
             f.set_aircraft_path(aircraft_path)
             f.set_engine_path(engine_path)
         elif vehicle.model_dir:
@@ -196,8 +157,8 @@ class Plant:
         f["ic/h-agl-ft"] = alt_m / FT
         f["ic/vc-kts"] = speed_kts
         f["ic/psi-true-deg"] = heading_deg
-        if catapult:
-            f["ic/theta-deg"] = catapult.pitch_deg
+        if launcher:
+            f["ic/theta-deg"] = launcher.pitch_deg
         else:
             f["ic/gamma-deg"] = 0.0
         for prop, value in vehicle.init.items():
@@ -209,67 +170,30 @@ class Plant:
         self.time = 0.0
         self._steps = 0
         self._target = 0.0
-        self._stroke = None     # (time on the rail s, distance run ft) while the catapult fires
-        self._saved_integrators = {}
-        if catapult:
-            for axis in "xyz":
-                f[f"external_reactions/catapult/location-{axis}-in"] = f[f"inertia/cg-{axis}-in"]
-            f["forces/hold-down"] = 1
+        self.rail = Rail(f, launcher, self.DT) if launcher else None
 
     @property
     def on_rail(self):
-        """Held on the catapult or running along it."""
-        return bool(self.catapult) and (self.fdm["forces/hold-down"] == 1 or self._stroke is not None)
+        """On its launcher, not yet off the rail's end."""
+        return bool(self.rail) and self.rail.on_rail
 
-    def launch(self):
+    def fire(self):
         """Fire the catapult: from here the vehicle runs along the rail to its launch speed, then flies free."""
-        f = self.fdm
-        if not self.catapult or f["forces/hold-down"] != 1:
-            raise RuntimeError("no catapult holding the vehicle")
-        # attitude locked: rotation is not integrated while on the rail
-        self._saved_integrators = {k: f[k] for k in self._ROTATION_INTEGRATORS}
-        for k in self._ROTATION_INTEGRATORS:
-            f[k] = 0
-        f["forces/hold-down"] = 0
-        self._stroke = (0.0, 0.0)
-
-    def _rail_force(self):
-        """The external force that makes this step's total acceleration the rail's: along the nose at the
-        catapult's constant acceleration, nothing across it."""
-        f, c = self.fdm, self.catapult
-        accel = (c.speed_ms / FT) ** 2 / (2.0 * c.length_m / FT)       # ft/s^2
-        t, _ = self._stroke
-        u, v, w = (f[f"velocities/{axis}-fps"] for axis in "uvw")
-        want = (accel + self.RAIL_GAIN * (accel * (t + self.DT) - u), -self.RAIL_GAIN * v, -self.RAIL_GAIN * w)
-        mass = f["inertia/mass-slugs"]
-        force = [mass * want[i] - sum(f[f"forces/fb{axis}-{source}-lbs"] for source in ("aero", "prop", "gear", "weight"))
-                 for i, axis in enumerate("xyz")]
-        magnitude = math.sqrt(sum(component * component for component in force))
-        for axis, component in zip("xyz", force):
-            f[f"external_reactions/catapult/{axis}"] = component / magnitude
-        f["external_reactions/catapult/magnitude"] = magnitude
-
-    def _end_stroke(self):
-        f = self.fdm
-        f["external_reactions/catapult/magnitude"] = 0.0
-        for k, value in self._saved_integrators.items():
-            f[k] = value
-        self._stroke = None
+        if not self.rail:
+            raise RuntimeError("no launcher: start the vehicle on one (launcher=...)")
+        self.rail.fire()
 
     def advance(self, seconds):
         # count whole steps against the accumulated target, so a partial step
         # carries over instead of every call rounding up
         self._target += seconds
         while (self._steps + 1) * self.DT <= self._target:
-            if self._stroke is not None:
-                self._rail_force()
+            if self.rail:
+                self.rail.before_step()
             self.fdm.run()
             self._steps += 1
-            if self._stroke is not None:
-                t, run_ft = self._stroke
-                self._stroke = (t + self.DT, run_ft + self.fdm["velocities/u-fps"] * self.DT)
-                if self._stroke[1] >= self.catapult.length_m / FT:
-                    self._end_stroke()
+            if self.rail:
+                self.rail.after_step()
         self.time = self._steps * self.DT
         agl_ft = self.fdm["position/h-agl-ft"]
         if math.isnan(agl_ft) or agl_ft < GROUND_STRIKE_FT:
@@ -302,8 +226,9 @@ class Plant:
     def acc_mg(self):
         # specific force; JSBSim's is (Nx, Ny, -Nz) g in forward-right-down
         f = self.fdm
-        if f["forces/hold-down"] == 1:
-            # JSBSim zeroes its accelerations while held; the accelerometer still feels what holds it up
+        if self.rail and self.rail.held:
+            # JSBSim zeroes its accelerations while it holds the vehicle; the accelerometer still feels what
+            # holds it up (anything held still reads exactly that)
             return self.static_acc_mg()
         return self._fc_frame((f["accelerations/Nx"] * 1000, -f["accelerations/Ny"] * 1000, f["accelerations/Nz"] * 1000))
 

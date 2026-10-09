@@ -18,7 +18,9 @@ python3 -m inavbench.selftest /path/to/inav/build_sitl/bin/SITL.elf
 
 Flies the quad (takeoff, POSHOLD, RTH to landing) and the plane (banks, RTH) and prints PASS/FAIL. Run it whenever you switch firmware.
 
-Vehicles: `quad` (JSBSim F450), `plane` (JSBSim Cessna 172, airborne start), `rascal` (ArduPilot's Rascal 110 RC trainer in `inavbench/models`, launched from its catapult in NAV LAUNCH). `Bench(catapult=Catapult(...))` starts any vehicle on a perfect launcher and `launch()` fires it.
+Vehicles: `quad` (JSBSim F450), `plane` (JSBSim Cessna 172, airborne start), `rascal` (ArduPilot's Rascal 110 RC trainer in `inavbench/models`, launched from its catapult in NAV LAUNCH).
+
+Launchers (`inavbench/launchers.py`), for any vehicle: `Bench(launcher=Catapult(pitch_deg, length_m, speed_ms, height_m))` holds it still, then pushes it along a perfect rail to speed; `Bench(launcher=LaunchRail(pitch_deg, length_m, height_m))` is the same rail unpowered, like a model rocket's rod, where only the vehicle's thrust takes it off. `b.launch(throttle, modes=(), wait_s=1.0)` does the INAV side: `modes=()` launches in ACRO, `("NAV LAUNCH",)` uses INAV's launch (catapult only). `examples/launch.py` flies all three.
 
 `--stepped` flies on SITL's stepped clock (`Bench(stepped=True)`, needs an INAV SITL with the stepped clock), with SITL's `--faster` (`Bench(faster=True)`: about twice the frame rate, one CPU core held; single runs only); `--rate=HZ` sets the tick rate.
 

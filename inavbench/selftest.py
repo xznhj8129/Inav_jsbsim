@@ -87,17 +87,14 @@ def _rth_end(b):
 def plane(sitl, stepped, rate_hz, vehicle="plane"):
     """A vehicle with a default launcher takes off from it in NAV LAUNCH; the rest start in the air."""
     checks = []
-    catapult = VEHICLES[vehicle].launcher
-    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz, catapult=catapult, faster=stepped) as b:
-        if catapult:
-            b.mode("NAV LAUNCH")
-            b.arm()
-            b.sticks(throttle=0.7)
-            b.run(2)            # INAV spins the motor up to its launch idle before it looks for the throw
-            b.launch()
+    launcher = VEHICLES[vehicle].launcher
+    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz, launcher=launcher, faster=stepped) as b:
+        if launcher:
+            # INAV's launch spins the motor up to its idle over 1.5 s before it looks for the throw
+            b.launch(throttle=0.7, modes=("NAV LAUNCH",), wait_s=2.0)
             b.run(6)
             agl = b.truth()["agl_m"]
-            checks.append((f"catapult launch climbed out ({agl:.0f} m after 6 s)", agl > 15))
+            checks.append((f"launch climbed out ({agl:.0f} m after 6 s)", agl > 15))
             b.mode("NAV LAUNCH", on=False)
             b.mode("ANGLE")
         else:
