@@ -33,7 +33,7 @@ def _from_home(b):
 
 def quad(sitl, stepped, rate_hz):
     checks = []
-    with Bench("quad", sitl=sitl, stepped=stepped, rate_hz=rate_hz) as b:
+    with Bench("quad", sitl=sitl, stepped=stepped, rate_hz=rate_hz, faster=stepped) as b:
         b.mode("ANGLE")
         b.arm()
         b.sticks(throttle=0.62)
@@ -88,7 +88,7 @@ def plane(sitl, stepped, rate_hz, vehicle="plane"):
     """A vehicle with a default launcher takes off from it in NAV LAUNCH; the rest start in the air."""
     checks = []
     catapult = VEHICLES[vehicle].launcher
-    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz, catapult=catapult) as b:
+    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz, catapult=catapult, faster=stepped) as b:
         if catapult:
             b.mode("NAV LAUNCH")
             b.arm()

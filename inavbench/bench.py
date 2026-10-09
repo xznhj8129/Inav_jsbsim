@@ -190,12 +190,14 @@ def _die_with_parent(parent_pid):
 class Bench:
     def __init__(self, vehicle, sitl, *, port=5760, workdir=None, cli=(), airborne=None, alt_m=None,
                  speed_kts=None, heading_deg=0.0, home=HOME, log=None, log_extra=None, log_fc=False, battery=None,
-                 pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False, catapult=None):
+                 pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False, catapult=None, faster=False):
         """vehicle: a key of VEHICLES ("quad", "plane") or a Vehicle.
         port: SITL's first TCP port; it takes one per UART, so space parallel benches 10 apart.
         cli: extra INAV CLI lines applied after the vehicle profile, e.g. your own diff.
         home: (lat, lon) start position; truth() north/east are measured from it.
         rate_hz: sim-loop ticks per second; None runs as fast as SITL answers (~850/s, twice the CPU).
+        faster: with stepped, SITL waits for the next frame without sleeping (--faster): about twice as
+            fast, but SITL holds a CPU core. For a single run; leave it off when several run at once.
         catapult: a vehicles.Catapult to start on, held still until launch() fires it (overrides airborne/alt/speed).
         stepped: drive SITL's clock (needs a SITL with the stepped clock): every tick carries a 1/rate_hz step that
             SITL runs before replying, so flight time is sim time and runs as fast as the two processes can go.
@@ -224,6 +226,7 @@ class Bench:
             raise ValueError("stepped needs a rate_hz: it sets the step")
         self._period = 1.0 / rate_hz if rate_hz else 0.0
         self.stepped = stepped
+        self.faster = faster
         self._sim_t = 0.0       # flight time on the stepped clock, s
         self._own_workdir = workdir is None
         self.workdir = workdir or tempfile.mkdtemp(prefix="inavbench-")
@@ -263,7 +266,8 @@ class Bench:
             os.remove(eeprom)
         self._sitl_log = open(os.path.join(self.workdir, "sitl.log"), "w")
         self._proc = subprocess.Popen(
-            [self.sitl, f"--path={eeprom}", f"--tcpbaseport={self.port}"],
+            [self.sitl, f"--path={eeprom}", f"--tcpbaseport={self.port}",
+             *(["--faster"] if self.stepped and self.faster else [])],
             cwd=self.workdir, stdout=self._sitl_log, stderr=subprocess.STDOUT, start_new_session=True,
             preexec_fn=_die_with_parent(os.getpid()) if sys.platform.startswith("linux") else None)
 

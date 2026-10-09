@@ -20,7 +20,7 @@ Flies the quad (takeoff, POSHOLD, RTH to landing) and the plane (banks, RTH) and
 
 Vehicles: `quad` (JSBSim F450), `plane` (JSBSim Cessna 172, airborne start), `rascal` (ArduPilot's Rascal 110 RC trainer in `inavbench/models`, launched from its catapult in NAV LAUNCH). `Bench(catapult=Catapult(...))` starts any vehicle on a perfect launcher and `launch()` fires it.
 
-`--stepped` flies on SITL's stepped clock (`Bench(stepped=True)`, needs an INAV SITL with the stepped clock), `--rate=HZ` sets the tick rate.
+`--stepped` flies on SITL's stepped clock (`Bench(stepped=True)`, needs an INAV SITL with the stepped clock), with SITL's `--faster` (`Bench(faster=True)`: about twice the frame rate, one CPU core held; single runs only); `--rate=HZ` sets the tick rate.
 
 ## Use it
 
