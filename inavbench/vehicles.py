@@ -44,6 +44,8 @@ class Vehicle:
                                 # mixer profile, sensors go in the hover frame (see tailsitter_hover_frame)
     hover_mixer_profile: int = 0  # INAV mixer profile index (0-based) flown in the hover frame
     launcher: "Catapult | LaunchRail | None" = None  # what it launches from by default (tests, scenarios); None = none
+    running_engines: tuple | None = None  # JSBSim engine numbers started at load; None = all. Starting an engine
+                                # runs it at full throttle to its steady state, which lights a solid rocket.
 
 
 VEHICLES = {
@@ -166,7 +168,8 @@ class Plant:
         f.run_ic()
         if not airborne:
             f["simulation/do_simple_trim"] = 2      # settle onto the landing gear
-        f["propulsion/set-running"] = -1
+        for engine in (-1,) if vehicle.running_engines is None else vehicle.running_engines:
+            f["propulsion/set-running"] = engine
         self.time = 0.0
         self._steps = 0
         self._target = 0.0

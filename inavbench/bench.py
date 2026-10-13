@@ -191,7 +191,8 @@ def _die_with_parent(parent_pid):
 class Bench:
     def __init__(self, vehicle, sitl, *, port=5760, workdir=None, cli=(), airborne=None, alt_m=None,
                  speed_kts=None, heading_deg=0.0, home=HOME, log=None, log_extra=None, log_fc=False, battery=None,
-                 pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False, launcher=None, faster=False):
+                 pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False, launcher=None, faster=False,
+                 gcs_msp=True, gcs_mavlink=True):
         """vehicle: a key of VEHICLES ("quad", "plane") or a Vehicle.
         port: SITL's first TCP port; it takes one per UART, so space parallel benches 10 apart.
         cli: extra INAV CLI lines applied after the vehicle profile, e.g. your own diff.
@@ -206,6 +207,7 @@ class Bench:
         log: CSV path for a per-run flight log (FC vs truth, RC, outputs).
         log_extra: function(bench) -> {column: number}, called for every log row; its columns follow the standard ones.
         log_fc: also log what INAV reports (FC_LOG_FIELDS and every flight mode), read over MSP on each log row.
+        gcs_msp/gcs_mavlink: enable external configurator/telemetry UARTs. The bench's own MSP link stays active.
         battery: function(bench) -> (volts, amps) fed to INAV's battery voltage and current meters every tick (the
             config needs feature VBAT and feature CURRENT_METER); None leaves INAV on a simulated full 3S pack."""
         self.vehicle = VEHICLES[vehicle] if isinstance(vehicle, str) else vehicle
@@ -213,6 +215,8 @@ class Bench:
         self.port = port
         self.gcs_msp_port = port + 1
         self.gcs_mavlink_port = port + 2
+        self.gcs_msp = gcs_msp
+        self.gcs_mavlink = gcs_mavlink
         self.extra_cli = list(cli)
         self.airborne = self.vehicle.airborne if airborne is None else airborne
         self.start_state = dict(airborne=self.airborne, alt_m=alt_m, speed_kts=speed_kts, heading_deg=heading_deg,
@@ -279,7 +283,8 @@ class Bench:
         msp.cli(self._profile_lines(bind_mavlink))
         msp.cli_save()          # reboots the SITL into the new config
         self.msp = self._connect()
-        print(f"GCS: MSP on tcp://127.0.0.1:{self.gcs_msp_port}, MAVLink on tcp://127.0.0.1:{self.gcs_mavlink_port}")
+        print(f"GCS: MSP {'on tcp://127.0.0.1:' + str(self.gcs_msp_port) if self.gcs_msp else 'disabled'}, "
+              f"MAVLink {'on tcp://127.0.0.1:' + str(self.gcs_mavlink_port) if self.gcs_mavlink else 'disabled'}")
 
         self._read_modes()
         self._wait_boot_calibration()
@@ -323,18 +328,18 @@ class Bench:
             lines = [ln.split("#", 1)[0].strip() for ln in f]
         # SITL maps UART n to TCP port base + n - 1. UART1 is the bench's own link;
         # UART2 and UART3 are left for a GCS / configurator to connect to
-        lines += ["serial 1 1 115200 115200 0 115200",        # UART2: MSP
-                  "serial 2 256 115200 115200 115200 115200",  # UART3: MAVLink
-                  "feature TELEMETRY",                         # MAVLink is only sent with it on
-                  "set mavlink_autopilot_type = ARDUPILOT"]    # what GCSs (QGC) handle properly
-        if bind_mavlink:
-            lines.append("set mavlink_port1_serial = 2")         # UART3 in the serial command's numbering
+        gcs = []
+        for protocol, enabled in (("msp", self.gcs_msp), ("mavlink", self.gcs_mavlink)):
+            with open(os.path.join(PROFILES, f"gcs_{protocol}_{'on' if enabled else 'off'}.cli")) as f:
+                gcs.extend(ln.split("#", 1)[0].strip() for ln in f)
+        if bind_mavlink and self.gcs_mavlink:
+            gcs.append("set mavlink_port1_serial = 2")         # UART3 in the serial command's numbering
         # INAV only takes HITL airspeed / rangefinder data into a configured sensor
         if self.use_pitot:
             lines.append("set pitot_hardware = FAKE")
         if self.use_rangefinder:
             lines.append("set rangefinder_hardware = FAKE")
-        return [ln for ln in lines if ln] + self.extra_cli
+        return [ln for ln in lines if ln] + self.extra_cli + [ln for ln in gcs if ln]
 
     def _connect(self, timeout=10.0):
         deadline = time.monotonic() + timeout
@@ -503,7 +508,7 @@ class Bench:
             self.rc[4 + aux] = (lo + hi) // 2
         else:
             self.rc[4 + aux] = next(v for v in (1000, 1500, 2000)
-                                    if not any(a == aux and l <= v < h for a, l, h in self._ranges[name]))
+                                    if not any(channel == aux and low <= v < high for channel, low, high in self._ranges[name]))
 
     def arm(self, timeout=10.0):
         self.sticks(throttle=0.0)

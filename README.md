@@ -43,7 +43,7 @@ with Bench("quad", sitl="/path/to/SITL.elf") as b:
 
 ## Watch from a GCS
 
-While a script runs, connect QGroundControl (TCP, `127.0.0.1:5762`, MAVLink) or INAV Configurator (TCP, `127.0.0.1:5761`, MSP). The bench prints both when it starts.
+While a script runs, connect QGroundControl (TCP, `127.0.0.1:5762`, MAVLink) or INAV Configurator (TCP, `127.0.0.1:5761`, MSP). The bench prints both when it starts. `Bench(gcs_msp=False, gcs_mavlink=False)` disables the external links; the bench MSP link stays active.
 
 For UDP (QGroundControl's default 14550) or several vehicles at once: `python3 -m inavbench.mavudp 5762 5772 ...` relays each vehicle's MAVLink TCP port to UDP 14550.
 
