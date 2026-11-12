@@ -1,8 +1,9 @@
 """Check the bench itself against a SITL build: sensors, outputs and nav all line up.
 
-    python3 -m inavbench.selftest /path/to/inav/build_sitl/bin/SITL.elf [quad|plane] [--stepped] [--rate=HZ]
+    python3 -m inavbench.selftest /path/to/inav/build_sitl/bin/SITL.elf [quad|plane] [--stepped] [--in-sitl] [--rate=HZ]
 
 --stepped flies on SITL's stepped clock (Bench(stepped=True)) instead of wall time.
+--in-sitl runs JSBSim inside SITL (Bench(in_sitl=True), implies --stepped; SITL built with JSBSim).
 --rate sets the bench's tick rate (Bench(rate_hz=...)); stepped, each tick is a 1/HZ step.
 
 This tests the bench, not a firmware feature. Run it when you switch firmware
@@ -31,9 +32,9 @@ def _from_home(b):
     return math.hypot(t["north_m"], t["east_m"])
 
 
-def quad(sitl, stepped, rate_hz):
+def quad(sitl, stepped, rate_hz, in_sitl=False):
     checks = []
-    with Bench("quad", sitl=sitl, stepped=stepped, rate_hz=rate_hz, faster=stepped) as b:
+    with Bench("quad", sitl=sitl, stepped=stepped, rate_hz=rate_hz, faster=stepped, in_sitl=in_sitl) as b:
         b.mode("ANGLE")
         b.arm()
         b.sticks(throttle=0.62)
@@ -84,11 +85,12 @@ def _rth_end(b):
     return (f"still flying ({agl:.0f} m above ground)", agl > 50)
 
 
-def plane(sitl, stepped, rate_hz, vehicle="plane"):
+def plane(sitl, stepped, rate_hz, in_sitl=False, vehicle="plane"):
     """A vehicle with a default launcher takes off from it in NAV LAUNCH; the rest start in the air."""
     checks = []
     launcher = VEHICLES[vehicle].launcher
-    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz, launcher=launcher, faster=stepped) as b:
+    with Bench(vehicle, sitl=sitl, stepped=stepped, rate_hz=rate_hz, launcher=launcher, faster=stepped,
+               in_sitl=in_sitl) as b:
         if launcher:
             # INAV's launch spins the motor up to its idle over 1.5 s before it looks for the throw
             b.launch(throttle=0.7, modes=("NAV LAUNCH",), wait_s=2.0)
@@ -130,15 +132,16 @@ def main():
         sys.exit(__doc__)
     sitl = sys.argv[1]
     options = [arg for arg in sys.argv[2:] if arg.startswith("--")]
-    stepped = "--stepped" in options
+    in_sitl = "--in-sitl" in options
+    stepped = "--stepped" in options or in_sitl
     rate_hz = next((int(arg.split("=", 1)[1]) for arg in options if arg.startswith("--rate=")), RATE_HZ)
     which = [arg for arg in sys.argv[2:] if not arg.startswith("--")] or ["quad", "plane"]
     ok = True
     for name in which:
-        print(f"--- {name} at {rate_hz} Hz" + (" (stepped clock)" if stepped else ""))
+        print(f"--- {name} at {rate_hz} Hz" + (" (JSBSim in SITL)" if in_sitl else " (stepped clock)" if stepped else ""))
         started = time.monotonic()
         tests = {"quad": quad, "plane": plane, "rascal": lambda *a: plane(*a, vehicle="rascal")}
-        for text, passed in tests[name](sitl, stepped, rate_hz):
+        for text, passed in tests[name](sitl, stepped, rate_hz, in_sitl):
             print(("PASS " if passed else "FAIL ") + text)
             ok &= passed
         print(f"     {time.monotonic() - started:.1f} s wall")

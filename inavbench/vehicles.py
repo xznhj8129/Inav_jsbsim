@@ -7,6 +7,7 @@ import math
 import os
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
 import jsbsim
@@ -85,6 +86,51 @@ VEHICLES = {
         launcher=Catapult(),
     ),
 }
+
+
+JSBSIM_DATA = os.path.dirname(os.path.abspath(jsbsim.__file__))   # the jsbsim package's aircraft/, engine/, systems/
+
+
+def write_sitl_vehicle(vehicle, workdir, airborne, alt_m, speed_kts, heading_deg, home, gps_hz, rangefinder_m=None):
+    """The vehicle file for SITL's own JSBSim (--sim=jsbsim --simcfg=...) and the JSBSim initialization file it
+    names, written into workdir; returns the vehicle file's path. Same model, outputs and start as Plant."""
+    ic = ET.Element("initialize", name="bench_start")
+    # geodetic, as GPS gives it and Plant sets it; JSBSim reads a plain latitude as geocentric
+    ET.SubElement(ic, "latitude", unit="DEG", type="geodetic").text = repr(home[0])
+    for tag, unit, value in (("longitude", "DEG", home[1]), ("elevation", "FT", 0.0),
+                             ("altitudeAGL", "M", alt_m if airborne else 0.0), ("psi", "DEG", heading_deg),
+                             ("vc", "KTS", speed_kts if airborne else 0.0)):
+        ET.SubElement(ic, tag, unit=unit).text = repr(value)
+    if airborne:
+        ET.SubElement(ic, "gamma", unit="DEG").text = "0.0"
+    else:
+        ET.SubElement(ic, "trim").text = "ground"       # settle onto the landing gear
+    for engine in (-1,) if vehicle.running_engines is None else vehicle.running_engines:
+        ET.SubElement(ic, "running").text = str(engine)
+    ic_path = os.path.join(workdir, "jsbsim_start.xml")
+    ET.ElementTree(ic).write(ic_path, xml_declaration=True)
+
+    v = ET.Element("inav_vehicle")
+    ET.SubElement(v, "model", root=vehicle.model_dir or JSBSIM_DATA, dt=repr(Plant.DT)).text = vehicle.model
+    ET.SubElement(v, "initialize").text = ic_path
+    for prop, value in vehicle.init.items():
+        ET.SubElement(v, "property", name=prop).text = repr(value)
+    for index, prop in enumerate(vehicle.motors):
+        ET.SubElement(v, "motor", index=str(index)).text = prop
+    for index, props in enumerate(vehicle.servos):
+        for prop in (props,) if isinstance(props, str) else props:
+            if prop.startswith("-"):
+                ET.SubElement(v, "servo", index=str(index), invert="true").text = prop[1:]
+            else:
+                ET.SubElement(v, "servo", index=str(index)).text = prop
+    ET.SubElement(v, "gps", rate=str(gps_hz))
+    if rangefinder_m is not None:
+        ET.SubElement(v, "rangefinder", max=repr(rangefinder_m))
+    for text in vehicle.known_errors:
+        ET.SubElement(v, "known_error").text = text
+    path = os.path.join(workdir, "jsbsim_vehicle.xml")
+    ET.ElementTree(v).write(path, xml_declaration=True)
+    return path
 
 
 def tailsitter_hover_frame(v):

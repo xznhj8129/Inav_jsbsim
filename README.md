@@ -24,6 +24,8 @@ Launchers (`inavbench/launchers.py`), for any vehicle: `Bench(launcher=Catapult(
 
 `--stepped` flies on SITL's stepped clock (`Bench(stepped=True)`, needs an INAV SITL with the stepped clock), with SITL's `--faster` (`Bench(faster=True)`: about twice the frame rate, one CPU core held; single runs only); `--rate=HZ` sets the tick rate.
 
+`--in-sitl` runs JSBSim inside SITL instead of in Python (`Bench(in_sitl=True)`, implies stepped; needs an INAV SITL built with JSBSim, `--sim=jsbsim`). The bench writes SITL's vehicle file from the `Vehicle` and its start, sends only the sticks and the step each tick, and reads the truth from SITL's reply; INAV's own AHRS runs on the simulated IMU (`--useimu`). Airborne starts fly from the first step (no hold), and wind, GPS loss, battery, launchers and tailsitters are not available in this mode.
+
 ## Use it
 
 ```python

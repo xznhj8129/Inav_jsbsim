@@ -15,6 +15,7 @@ HITL_CURRENT_SENSOR = 1 << 10
 HITL_SIM_RC_INPUT = 1 << 11
 HITL_RANGEFINDER = 1 << 12
 HITL_FAILSAFE_TRIGGERED = 1 << 13
+HITL_SITL_MODE = 1 << 14       # no sensors in the frame: with --sim=jsbsim, SITL's own JSBSim supplies them
 HITL_STEPPED_CLOCK = 1 << 15   # SITL runs the frame's step of sim time before replying
 
 BASE_FLAGS = HITL_ENABLE | HITL_MUTE_BEEPER | HITL_USE_IMU | HITL_SIM_RC_INPUT
@@ -40,6 +41,11 @@ _TAIL = struct.Struct("<HH8HH")
 _AIRSPEED = struct.Struct("<H")
 _BATTERY = struct.Struct("<B")
 _STEP = struct.Struct("<I")
+# SITL mode (--sim=jsbsim): version, flags, 8 RC channels, rssi, step
+_SITL_STEP = struct.Struct("<BH8HHI")
+# appended to the reply of a SITL-mode step: sim time us, lat, lon (1e7 deg), alt MSL, AGL (cm),
+# roll, pitch, yaw (decidegrees, INAV's signs), velocity N, E, D (cm/s), airspeed (cm/s)
+_TRUTH = struct.Struct("<IiiiihhhhhhH")
 _NO_GPS = (0,) * 10
 # field ranges, used only when a value is out of range (a diverged plant)
 _U8, _U16, _I16, _I32, _U32 = (0, 255), (0, 65535), (-32768, 32767), (-2**31, 2**31 - 1), (0, 2**32 - 1)
@@ -98,3 +104,19 @@ def unpack(payload):
     # INAV's own pitch is positive nose down; flip it so it compares directly with the truth
     return Reply(armed=bool(payload[8] & 64), roll=roll / 10.0, pitch=-pitch / 10.0, yaw=yaw / 10.0, stabilized=stabilized,
                  stepped=bool(payload[8] & 8))
+
+
+def pack_sitl_step(rc_us, step_us, rc_link=True):
+    """A SITL-mode step for SITL running its own JSBSim (--sim=jsbsim): the sticks and the step, no sensors.
+    rc_link=False tells INAV its receiver is in failsafe."""
+    flags = HITL_SITL_MODE | HITL_STEPPED_CLOCK | HITL_SIM_RC_INPUT | (0 if rc_link else HITL_FAILSAFE_TRIGGERED)
+    return _SITL_STEP.pack(3, flags, *rc_us, 1000, step_us)
+
+
+def unpack_truth(payload):
+    """The truth block at the end of a SITL-mode step's reply, in the bench's truth units and signs
+    (roll right, pitch nose up, yaw clockwise from north, degrees; m, m/s)."""
+    t_us, lat, lon, alt_cm, agl_cm, roll, pitch, yaw, vn, ve, vd, airspeed = _TRUTH.unpack_from(payload, len(payload) - _TRUTH.size)
+    return dict(sim_time_s=t_us / 1e6, lat=lat / 1e7, lon=lon / 1e7, alt_msl_m=alt_cm / 100.0, agl_m=agl_cm / 100.0,
+                roll=roll / 10.0, pitch=-pitch / 10.0, yaw=yaw / 10.0, vn=vn / 100.0, ve=ve / 100.0, vd=vd / 100.0,
+                airspeed_ms=airspeed / 100.0)

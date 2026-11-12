@@ -10,6 +10,7 @@
 """
 import csv
 import ctypes
+import math
 import os
 import shutil
 import signal
@@ -22,7 +23,8 @@ import time
 from . import hitl
 from .msp import Msp, MspError
 from .launchers import Catapult
-from .vehicles import HOME, PROFILES, VEHICLES, Plant
+from .units import KTS
+from .vehicles import HOME, PROFILES, VEHICLES, Plant, write_sitl_vehicle
 
 MSP_SERVO = 103
 MSP_MOTOR = 104
@@ -192,7 +194,7 @@ class Bench:
     def __init__(self, vehicle, sitl, *, port=5760, workdir=None, cli=(), airborne=None, alt_m=None,
                  speed_kts=None, heading_deg=0.0, home=HOME, log=None, log_extra=None, log_fc=False, battery=None,
                  pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False, launcher=None, faster=False,
-                 gcs_msp=True, gcs_mavlink=True):
+                 gcs_msp=True, gcs_mavlink=True, in_sitl=False):
         """vehicle: a key of VEHICLES ("quad", "plane") or a Vehicle.
         port: SITL's first TCP port; it takes one per UART, so space parallel benches 10 apart.
         cli: extra INAV CLI lines applied after the vehicle profile, e.g. your own diff.
@@ -208,6 +210,11 @@ class Bench:
         log_extra: function(bench) -> {column: number}, called for every log row; its columns follow the standard ones.
         log_fc: also log what INAV reports (FC_LOG_FIELDS and every flight mode), read over MSP on each log row.
         gcs_msp/gcs_mavlink: enable external configurator/telemetry UARTs. The bench's own MSP link stays active.
+        in_sitl: JSBSim runs inside SITL (--sim=jsbsim, needs a SITL built with JSBSim) instead of in this process.
+            The bench writes SITL's vehicle file from the Vehicle and its start, and each tick sends only the sticks
+            and the step; the truth comes back in the reply. Needs stepped. Physics runs from the first step, so an
+            airborne start flies from there (no hold, release() does nothing). Wind, GPS loss, battery, launchers
+            and tailsitters are not available in this mode.
         battery: function(bench) -> (volts, amps) fed to INAV's battery voltage and current meters every tick (the
             config needs feature VBAT and feature CURRENT_METER); None leaves INAV on a simulated full 3S pack."""
         self.vehicle = VEHICLES[vehicle] if isinstance(vehicle, str) else vehicle
@@ -230,6 +237,12 @@ class Bench:
         self.fc_telemetry = {}  # the last FC_LOG_FIELDS and mode columns read (log_fc)
         if stepped and not rate_hz:
             raise ValueError("stepped needs a rate_hz: it sets the step")
+        if in_sitl and not stepped:
+            raise ValueError("in_sitl runs on SITL's stepped clock: pass stepped=True")
+        if in_sitl and (launcher or battery or self.vehicle.launcher or self.vehicle.tailsitter):
+            raise ValueError("in_sitl has no launchers, battery model or tailsitter frame")
+        self.in_sitl = in_sitl
+        self._truth = None      # in_sitl: the truth from the last reply
         self._period = 1.0 / rate_hz if rate_hz else 0.0
         self.stepped = stepped
         self.faster = faster
@@ -271,8 +284,19 @@ class Bench:
         if os.path.exists(eeprom):
             os.remove(eeprom)
         self._sitl_log = open(os.path.join(self.workdir, "sitl.log"), "w")
+        sim = []
+        if self.in_sitl:
+            st = self.start_state
+            vehicle_file = write_sitl_vehicle(
+                self.vehicle, self.workdir, st["airborne"],
+                self.vehicle.alt_m if st["alt_m"] is None else st["alt_m"],
+                self.vehicle.speed_kts if st["speed_kts"] is None else st["speed_kts"],
+                st["heading_deg"], st["home"], GPS_HZ, 10.0 if self.use_rangefinder else None)
+            # --useimu: INAV's own AHRS works from the simulated IMU, as with HITL_USE_IMU; without it SITL
+            # would inject the true attitude and the AHRS would not be tested
+            sim = ["--sim=jsbsim", f"--simcfg={vehicle_file}", "--useimu"]
         self._proc = subprocess.Popen(
-            [self.sitl, f"--path={eeprom}", f"--tcpbaseport={self.port}",
+            [self.sitl, f"--path={eeprom}", f"--tcpbaseport={self.port}", *sim,
              *(["--faster"] if self.stepped and self.faster else [])],
             cwd=self.workdir, stdout=self._sitl_log, stderr=subprocess.STDOUT, start_new_session=True,
             preexec_fn=_die_with_parent(os.getpid()) if sys.platform.startswith("linux") else None)
@@ -288,13 +312,16 @@ class Bench:
 
         self._read_modes()
         self._wait_boot_calibration()
-        self.plant = Plant(self.vehicle, **self.start_state)
-        # an airborne start is pinned in place until release(); on a launcher JSBSim runs and the launcher holds it
-        self.hold = self.airborne and not self.plant.rail
+        if not self.in_sitl:
+            self.plant = Plant(self.vehicle, **self.start_state)
+            # an airborne start is pinned in place until release(); on a launcher JSBSim runs and the launcher holds it
+            self.hold = self.airborne and not self.plant.rail
         self._t_last = self._now()
         self._next_gps = 0.0
         self._t0 = self._t_last
         self._next_tick = self._t_last
+        if self.in_sitl:
+            self._tick()        # the first truth comes with the first reply
         self._open_log()
         self.run(SETTLE_S)
 
@@ -334,6 +361,10 @@ class Bench:
                 gcs.extend(ln.split("#", 1)[0].strip() for ln in f)
         if bind_mavlink and self.gcs_mavlink:
             gcs.append("set mavlink_port1_serial = 2")         # UART3 in the serial command's numbering
+        if self.in_sitl:
+            lines.append("set gps_provider = FAKE")     # SITL's JSBSim feeds INAV's simulated GPS
+            # INAV turns a DEFAULT-aligned compass CW270FLIP (the usual external mount); SITL's is the body frame
+            lines.append("set align_mag = CW0")
         # INAV only takes HITL airspeed / rangefinder data into a configured sensor
         if self.use_pitot:
             lines.append("set pitot_hardware = FAKE")
@@ -393,31 +424,38 @@ class Bench:
             self._sim_t += self._period
         now = self._now()
         p = self.plant
-        if not self.hold:
-            # advance by the full gap: the FC kept running with the last outputs
-            p.advance(now - self._t_last)
-        self._t_last = now
-
-        gps = None
-        if now >= self._next_gps:
-            self._next_gps = now + 1.0 / GPS_HZ
-            gps = p.gps(self.gps_fix)
-        flags = hitl.BASE_FLAGS | (0 if self.rc_link else hitl.HITL_FAILSAFE_TRIGGERED)
-        if self.hold:
-            acc, gyro = p.static_acc_mg(), (0, 0, 0)
+        if self.in_sitl:
+            if not self.gps_fix:
+                raise RuntimeError("in_sitl: SITL's JSBSim always has a GPS fix")
+            frame = hitl.pack_sitl_step(self.rc, round(self._period * 1e6), self.rc_link)
         else:
-            acc, gyro = p.acc_mg(), p.gyro_dps16()
-        frame = hitl.pack(flags, acc, gyro, p.baro_pa(), p.mag(), self.rc, gps=gps,
-                          airspeed_cms=p.airspeed_cms() if self.use_pitot else None,
-                          rangefinder_cm=p.rangefinder_cm() if self.use_rangefinder else None,
-                          battery=self.battery(self) if self.battery else None,
-                          step_us=round(self._period * 1e6) if self.stepped else None)
+            if not self.hold:
+                # advance by the full gap: the FC kept running with the last outputs
+                p.advance(now - self._t_last)
+
+            gps = None
+            if now >= self._next_gps:
+                self._next_gps = now + 1.0 / GPS_HZ
+                gps = p.gps(self.gps_fix)
+            flags = hitl.BASE_FLAGS | (0 if self.rc_link else hitl.HITL_FAILSAFE_TRIGGERED)
+            if self.hold:
+                acc, gyro = p.static_acc_mg(), (0, 0, 0)
+            else:
+                acc, gyro = p.acc_mg(), p.gyro_dps16()
+            frame = hitl.pack(flags, acc, gyro, p.baro_pa(), p.mag(), self.rc, gps=gps,
+                              airspeed_cms=p.airspeed_cms() if self.use_pitot else None,
+                              rangefinder_cm=p.rangefinder_cm() if self.use_rangefinder else None,
+                              battery=self.battery(self) if self.battery else None,
+                              step_us=round(self._period * 1e6) if self.stepped else None)
+        self._t_last = now
         fc_log_due = self.log_fc and getattr(self, "_log_file", None) and now >= self._next_log
         requests = self._requests(frame, fc_log_due)
         replies = dict(zip((cmd for cmd, _ in requests), self.msp.request_many(requests)))
         self.fc = hitl.unpack(replies[hitl.MSP_SIMULATOR])
         if self.stepped and not self.fc.stepped:
             raise RuntimeError("SITL did not take the step: this build has no stepped clock")
+        if self.in_sitl:
+            self._truth = self._sitl_truth(hitl.unpack_truth(replies[hitl.MSP_SIMULATOR]))
         self.motors = _MOTORS.unpack(replies[MSP_MOTOR])
         if self.vehicle.tailsitter:
             # MSP2_INAV_STATUS ends with the active mixer profile; sensors follow it from the next tick
@@ -427,7 +465,8 @@ class Bench:
             self.servos = struct.unpack(f"<{len(replies[MSP_SERVO]) // 2}H", replies[MSP_SERVO])
         if fc_log_due:
             self.fc_telemetry = fc_telemetry(replies, self.fc.stabilized, self._box_names)
-        p.set_outputs(self.motors, self.servos)
+        if not self.in_sitl:
+            p.set_outputs(self.motors, self.servos)
         self._log_row(now)
 
         if self._period and not self.stepped:
@@ -522,6 +561,8 @@ class Bench:
         self.run(0.3)
 
     def wind(self, north_ms=0.0, east_ms=0.0, down_ms=0.0):
+        if self.in_sitl:
+            raise RuntimeError("in_sitl: wind is a start condition in SITL's vehicle file")
         self.plant.set_wind(north_ms, east_ms, down_ms)
 
     # --- what the FC thinks ---------------------------------------------------------
@@ -556,7 +597,25 @@ class Bench:
         return dict(mode=mode, state=state, wp_action=wp_action, wp_number=wp_number, error=error)
 
     def truth(self):
-        return self.plant.truth()
+        return self._truth if self.in_sitl else self.plant.truth()
+
+    def _sitl_truth(self, t):
+        """SITL's truth block in Plant.truth()'s keys."""
+        home = self.start_state["home"]
+        return {
+            "lat": t["lat"],
+            "lon": t["lon"],
+            "north_m": (t["lat"] - home[0]) * 111320.0,
+            "east_m": (t["lon"] - home[1]) * 111320.0 * math.cos(math.radians(home[0])),
+            "agl_m": t["agl_m"],
+            "roll": t["roll"],
+            "pitch": t["pitch"],
+            "yaw": t["yaw"] % 360.0,
+            "vn": t["vn"],
+            "ve": t["ve"],
+            "vd": t["vd"],
+            "ias_kts": t["airspeed_ms"] / KTS,
+        }
 
     def _read_modes(self):
         ids = list(self.msp.request(MSP_BOXIDS))
@@ -579,7 +638,7 @@ class Bench:
             return
         self._log_file = open(self.log_path, "w", newline="")
         self._log = csv.writer(self._log_file)
-        self._log_fields = list(self.plant.truth())
+        self._log_fields = list(self.truth())
         self._extra_fields = list(self.log_extra(self)) if self.log_extra else []
         self._fc_fields = [*FC_LOG_FIELDS, *map(mode_column, self._box_names)] if self.log_fc else []
         self._log.writerow(["t", "armed", "fc_roll", "fc_pitch", "fc_yaw", *self._log_fields,
@@ -593,7 +652,7 @@ class Bench:
         if not getattr(self, "_log_file", None) or now < self._next_log:
             return
         self._next_log = now + 1.0 / LOG_HZ
-        t = self.plant.truth()
+        t = self.truth()
         self._log.writerow([f"{now - self._t0:.3f}", int(self.fc.armed), self.fc.roll, self.fc.pitch, self.fc.yaw,
                             *(f"{t[k]:.7f}" if k in ("lat", "lon") else f"{t[k]:.3f}" for k in self._log_fields),
                             *self.rc, *self.motors[:len(self.vehicle.motors)],
