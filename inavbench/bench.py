@@ -256,8 +256,9 @@ class Bench:
         self.gps_fix = True
         self.fc = None          # last hitl.Reply: armed + the FC's attitude estimate
         self.ticks = 0          # sim-loop ticks run so far
-        self.motors = ()
-        self.servos = ()
+        self._motors = ()
+        self._servos = ()
+        self._outputs_tick = -1  # tick the motor/servo outputs were last read at
         self.mixer_profile = None   # tailsitters: the FC's active mixer profile (0-based), read every tick
         self.hold = False       # True pins the vehicle in place (no physics, pure gravity)
         self.plant = None
@@ -456,13 +457,12 @@ class Bench:
             raise RuntimeError("SITL did not take the step: this build has no stepped clock")
         if self.in_sitl:
             self._truth = self._sitl_truth(hitl.unpack_truth(replies[hitl.MSP_SIMULATOR]))
-        self.motors = _MOTORS.unpack(replies[MSP_MOTOR])
+        if not self.in_sitl:
+            self._store_outputs(replies)
         if self.vehicle.tailsitter:
             # MSP2_INAV_STATUS ends with the active mixer profile; sensors follow it from the next tick
             self.mixer_profile = replies[MSP2_INAV_STATUS][-1]
             p.hover_frame = self.mixer_profile == self.vehicle.hover_mixer_profile
-        if self.vehicle.servos:
-            self.servos = struct.unpack(f"<{len(replies[MSP_SERVO]) // 2}H", replies[MSP_SERVO])
         if fc_log_due:
             self.fc_telemetry = fc_telemetry(replies, self.fc.stabilized, self._box_names)
         if not self.in_sitl:
@@ -476,10 +476,38 @@ class Bench:
             if delay > 0:
                 time.sleep(delay)
 
-    def _requests(self, frame, fc_log):
-        requests = [(hitl.MSP_SIMULATOR, frame), (MSP_MOTOR, b"")]
+    def _output_requests(self):
+        return [(MSP_MOTOR, b"")] + ([(MSP_SERVO, b"")] if self.vehicle.servos else [])
+
+    def _store_outputs(self, replies):
+        self._motors = _MOTORS.unpack(replies[MSP_MOTOR])
         if self.vehicle.servos:
-            requests.append((MSP_SERVO, b""))
+            self._servos = struct.unpack(f"<{len(replies[MSP_SERVO]) // 2}H", replies[MSP_SERVO])
+        self._outputs_tick = self.ticks
+
+    def _read_outputs(self):
+        """In SITL the outputs drive JSBSim directly; the bench reads them only when asked (log rows, scripts),
+        at most once per tick."""
+        if self.in_sitl and self._outputs_tick != self.ticks:
+            requests = self._output_requests()
+            self._store_outputs(dict(zip((cmd for cmd, _ in requests), self.msp.request_many(requests))))
+
+    @property
+    def motors(self):
+        """INAV's motor outputs (us) at the last tick."""
+        self._read_outputs()
+        return self._motors
+
+    @property
+    def servos(self):
+        """INAV's servo outputs (us) at the last tick."""
+        self._read_outputs()
+        return self._servos
+
+    def _requests(self, frame, fc_log):
+        requests = [(hitl.MSP_SIMULATOR, frame)]
+        if not self.in_sitl:
+            requests += self._output_requests()     # they drive the bench's own JSBSim
         if fc_log:
             requests += [(cmd, b"") for cmd in FC_LOG_REQUESTS]
         elif self.vehicle.tailsitter:
