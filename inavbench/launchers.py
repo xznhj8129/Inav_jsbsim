@@ -28,14 +28,23 @@ import jsbsim
 from .units import FT
 
 
+# What lets a catapult go when JSBSim runs inside SITL (Bench(in_sitl=True)); the values are SITL's vehicle-file
+# release attribute. In the bench's own JSBSim, fire() does.
+RELEASE_ARM = "arm"                     # INAV armed
+RELEASE_LAUNCH_READY = "launch_ready"   # INAV's NAV LAUNCH waiting for the throw ("READY TO LAUNCH")
+
+
 @dataclass(frozen=True)
 class Catapult:
     """Held still at pitch_deg, height_m above the ground, until fired; then pushed along the nose at constant
-    acceleration to speed_ms over length_m. Heading is the bench's heading_deg."""
+    acceleration to speed_ms over length_m. Heading is the bench's heading_deg.
+    release, release_delay_s: in SITL, it fires release_delay_s after the release condition first holds."""
     pitch_deg: float = 10.0
     length_m: float = 2.0
     speed_ms: float = 15.0
     height_m: float = 1.5
+    release: str = RELEASE_LAUNCH_READY
+    release_delay_s: float = 0.0
 
     @property
     def stroke_s(self):

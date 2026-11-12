@@ -22,7 +22,7 @@ import time
 
 from . import hitl
 from .msp import Msp, MspError
-from .launchers import Catapult
+from .launchers import Catapult, LaunchRail
 from .units import KTS
 from .vehicles import HOME, PROFILES, VEHICLES, Plant, write_sitl_vehicle
 
@@ -194,7 +194,7 @@ class Bench:
     def __init__(self, vehicle, sitl, *, port=5760, workdir=None, cli=(), airborne=None, alt_m=None,
                  speed_kts=None, heading_deg=0.0, home=HOME, log=None, log_extra=None, log_fc=False, battery=None,
                  pitot=False, rangefinder=False, rate_hz=RATE_HZ, stepped=False, launcher=None, faster=False,
-                 gcs_msp=True, gcs_mavlink=True, in_sitl=False):
+                 gcs_msp=True, gcs_mavlink=True, in_sitl=False, hold_release_s=0.5):
         """vehicle: a key of VEHICLES ("quad", "plane") or a Vehicle.
         port: SITL's first TCP port; it takes one per UART, so space parallel benches 10 apart.
         cli: extra INAV CLI lines applied after the vehicle profile, e.g. your own diff.
@@ -212,9 +212,10 @@ class Bench:
         gcs_msp/gcs_mavlink: enable external configurator/telemetry UARTs. The bench's own MSP link stays active.
         in_sitl: JSBSim runs inside SITL (--sim=jsbsim, needs a SITL built with JSBSim) instead of in this process.
             The bench writes SITL's vehicle file from the Vehicle and its start, and each tick sends only the sticks
-            and the step; the truth comes back in the reply. Needs stepped. Physics runs from the first step, so an
-            airborne start flies from there (no hold, release() does nothing). Wind, GPS loss, battery, launchers
-            and tailsitters are not available in this mode.
+            and the step; the truth comes back in the reply. Needs stepped. SITL lets go of the vehicle itself: an
+            airborne start is held until hold_release_s after arming (release() does nothing), a Catapult fires on
+            its release condition (fire() is refused, launch() ignores wait_s). Wind, GPS loss, battery, launch
+            rails and tailsitters are not available in this mode.
         battery: function(bench) -> (volts, amps) fed to INAV's battery voltage and current meters every tick (the
             config needs feature VBAT and feature CURRENT_METER); None leaves INAV on a simulated full 3S pack."""
         self.vehicle = VEHICLES[vehicle] if isinstance(vehicle, str) else vehicle
@@ -239,8 +240,9 @@ class Bench:
             raise ValueError("stepped needs a rate_hz: it sets the step")
         if in_sitl and not stepped:
             raise ValueError("in_sitl runs on SITL's stepped clock: pass stepped=True")
-        if in_sitl and (launcher or battery or self.vehicle.launcher or self.vehicle.tailsitter):
-            raise ValueError("in_sitl has no launchers, battery model or tailsitter frame")
+        if in_sitl and (isinstance(launcher, LaunchRail) or battery or self.vehicle.tailsitter):
+            raise ValueError("in_sitl has no launch rail, battery model or tailsitter frame")
+        self.hold_release_s = hold_release_s
         self.in_sitl = in_sitl
         self._truth = None      # in_sitl: the truth from the last reply
         self._period = 1.0 / rate_hz if rate_hz else 0.0
@@ -292,7 +294,8 @@ class Bench:
                 self.vehicle, self.workdir, st["airborne"],
                 self.vehicle.alt_m if st["alt_m"] is None else st["alt_m"],
                 self.vehicle.speed_kts if st["speed_kts"] is None else st["speed_kts"],
-                st["heading_deg"], st["home"], GPS_HZ, 10.0 if self.use_rangefinder else None)
+                st["heading_deg"], st["home"], GPS_HZ, 10.0 if self.use_rangefinder else None,
+                launcher=st["launcher"], hold_release_s=self.hold_release_s)
             # --useimu: INAV's own AHRS works from the simulated IMU, as with HITL_USE_IMU; without it SITL
             # would inject the true attitude and the AHRS would not be tested
             sim = ["--sim=jsbsim", f"--simcfg={vehicle_file}", "--useimu"]
@@ -525,6 +528,9 @@ class Bench:
         fixed-wing launch, which keeps the motor at idle until it detects the throw: that needs a catapult,
         and with nav_fw_launch_idle_thr set it spins up to idle over 1.5 s first, so wait_s must be longer.
         Every mode needs a switch (aux range) in the vehicle's profile."""
+        if self.in_sitl:
+            self._launch_in_sitl(throttle, modes, arm_timeout, rail_timeout)
+            return
         rail = self.plant.rail
         if not (rail and rail.held):
             raise RuntimeError("not held on a launcher: start with Bench(launcher=...)")
@@ -542,8 +548,28 @@ class Bench:
                                    f"does not beat weight and drag")
             self.run(self._period or 0.001)
 
+    def _launch_in_sitl(self, throttle, modes, arm_timeout, rail_timeout):
+        """SITL fires the catapult on its release condition; run until the vehicle has covered the rail."""
+        launcher = self.start_state["launcher"]
+        if not isinstance(launcher, Catapult):
+            raise RuntimeError("not on a catapult: start with Bench(launcher=Catapult(...))")
+        start = self.truth()
+        for name in modes:
+            self.mode(name)
+        self.arm(arm_timeout)
+        self.sticks(throttle=throttle)
+
+        def travelled_m(b):
+            t = b.truth()
+            return math.dist((t["north_m"], t["east_m"], t["agl_m"]), (start["north_m"], start["east_m"], start["agl_m"]))
+        if not self.run(rail_timeout, until=lambda b: travelled_m(b) >= launcher.length_m, check_every=self._period):
+            raise RuntimeError(f"still on the catapult after {rail_timeout:.0f} s: SITL did not release it "
+                               f"(release={launcher.release!r})")
+
     def fire(self):
         """Fire the catapult the vehicle started on, nothing else: launch() does the INAV side around it."""
+        if self.in_sitl:
+            raise RuntimeError("in_sitl: SITL fires the catapult itself, on its release condition")
         self.plant.fire()
 
     def release(self):

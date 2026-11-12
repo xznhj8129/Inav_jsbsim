@@ -24,7 +24,7 @@ Launchers (`inavbench/launchers.py`), for any vehicle: `Bench(launcher=Catapult(
 
 `--stepped` flies on SITL's stepped clock (`Bench(stepped=True)`, needs an INAV SITL with the stepped clock), with SITL's `--faster` (`Bench(faster=True)`: about twice the frame rate, one CPU core held; single runs only); `--rate=HZ` sets the tick rate.
 
-`--in-sitl` runs JSBSim inside SITL instead of in Python (`Bench(in_sitl=True)`, implies stepped; needs an INAV SITL built with JSBSim, `--sim=jsbsim`). The bench writes SITL's vehicle file from the `Vehicle` and its start, sends only the sticks and the step each tick, and reads the truth from SITL's reply; INAV's own AHRS runs on the simulated IMU (`--useimu`). Airborne starts fly from the first step (no hold), and wind, GPS loss, battery, launchers and tailsitters are not available in this mode.
+`--in-sitl` runs JSBSim inside SITL instead of in Python (`Bench(in_sitl=True)`, implies stepped; needs an INAV SITL built with JSBSim, `--sim=jsbsim`). The bench writes SITL's vehicle file from the `Vehicle` and its start, sends only the sticks and the step each tick, and reads the truth from SITL's reply; INAV's own AHRS runs on the simulated IMU (`--useimu`). SITL lets go of the vehicle itself: an airborne start is held until `hold_release_s` (0.5 s) after arming, and a `Catapult` fires on its `release` condition (`RELEASE_LAUNCH_READY`, the default: when INAV's NAV LAUNCH shows READY TO LAUNCH; or `RELEASE_ARM`), after `release_delay_s`. Wind, GPS loss, battery, launch rails and tailsitters are not available in this mode.
 
 ## Use it
 

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import jsbsim
 
-from .launchers import Catapult, LaunchRail, Rail, launcher_model
+from .launchers import RELEASE_ARM, Catapult, LaunchRail, Rail, launcher_model
 from .units import FT
 
 HOME = (36.530440, -83.216383)          # Sneedville, TN
@@ -91,9 +91,14 @@ VEHICLES = {
 JSBSIM_DATA = os.path.dirname(os.path.abspath(jsbsim.__file__))   # the jsbsim package's aircraft/, engine/, systems/
 
 
-def write_sitl_vehicle(vehicle, workdir, airborne, alt_m, speed_kts, heading_deg, home, gps_hz, rangefinder_m=None):
+def write_sitl_vehicle(vehicle, workdir, airborne, alt_m, speed_kts, heading_deg, home, gps_hz, rangefinder_m=None,
+                       launcher=None, hold_release_s=None):
     """The vehicle file for SITL's own JSBSim (--sim=jsbsim --simcfg=...) and the JSBSim initialization file it
-    names, written into workdir; returns the vehicle file's path. Same model, outputs and start as Plant."""
+    names, written into workdir; returns the vehicle file's path. Same model, outputs and start as Plant.
+    launcher: a Catapult the vehicle starts on. hold_release_s: an airborne start is held until this long after
+    arming (None: not held)."""
+    if launcher:
+        airborne, alt_m, speed_kts = True, launcher.height_m, 0.0
     ic = ET.Element("initialize", name="bench_start")
     # geodetic, as GPS gives it and Plant sets it; JSBSim reads a plain latitude as geocentric
     ET.SubElement(ic, "latitude", unit="DEG", type="geodetic").text = repr(home[0])
@@ -101,7 +106,9 @@ def write_sitl_vehicle(vehicle, workdir, airborne, alt_m, speed_kts, heading_deg
                              ("altitudeAGL", "M", alt_m if airborne else 0.0), ("psi", "DEG", heading_deg),
                              ("vc", "KTS", speed_kts if airborne else 0.0)):
         ET.SubElement(ic, tag, unit=unit).text = repr(value)
-    if airborne:
+    if launcher:
+        ET.SubElement(ic, "theta", unit="DEG").text = repr(launcher.pitch_deg)
+    elif airborne:
         ET.SubElement(ic, "gamma", unit="DEG").text = "0.0"
     else:
         ET.SubElement(ic, "trim").text = "ground"       # settle onto the landing gear
@@ -123,6 +130,11 @@ def write_sitl_vehicle(vehicle, workdir, airborne, alt_m, speed_kts, heading_deg
                 ET.SubElement(v, "servo", index=str(index), invert="true").text = prop[1:]
             else:
                 ET.SubElement(v, "servo", index=str(index)).text = prop
+    if launcher:
+        ET.SubElement(v, "catapult", length=repr(launcher.length_m), speed=repr(launcher.speed_ms),
+                      release=launcher.release, delay=repr(launcher.release_delay_s))
+    elif airborne and hold_release_s is not None:
+        ET.SubElement(v, "hold", release=RELEASE_ARM, delay=repr(hold_release_s))
     ET.SubElement(v, "gps", rate=str(gps_hz))
     if rangefinder_m is not None:
         ET.SubElement(v, "rangefinder", max=repr(rangefinder_m))
