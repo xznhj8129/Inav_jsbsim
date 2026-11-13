@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Example: the Rascal leaves a launcher: a catapult in ACRO or in INAV's launch mode, or an unpowered rail.
 
-    python3 examples/launch.py /path/to/inav/build_sitl/bin/SITL.elf [catapult-acro|catapult-nav|rail]
+    python3 examples/launch.py /path/to/inav/build_sitl/bin/SITL.elf [catapult-acro|catapult-nav|rail] [--in-sitl]
 
 catapult-acro (default): no flight mode while held, so nothing self-levels against the attitude the
     catapult holds; the motor runs up before the push, and ANGLE takes over once it is flying.
@@ -10,7 +10,8 @@ rail: an unpowered launch rail, like a model rocket's rod: nothing pushes, the m
     up the rail once it beats weight and drag. INAV only arms within small_angle (25 deg) of level; a
     steeper rail needs it raised: Bench(cli=["set small_angle = 90"]).
 
-All run on SITL's stepped clock with --faster; drop stepped/faster for wall time.
+All run on SITL's stepped clock with --faster; drop stepped/faster for wall time. --in-sitl runs JSBSim inside
+SITL (a SITL built with JSBSim).
 """
 import os
 import sys
@@ -32,7 +33,8 @@ def fly(b, seconds, phase):
         report(b, phase)
 
 
-style = sys.argv[2] if len(sys.argv) > 2 else "catapult-acro"
+args = [a for a in sys.argv[2:] if a != "--in-sitl"]
+style = args[0] if args else "catapult-acro"
 launchers = {
     "catapult-acro": Catapult(pitch_deg=10, length_m=2.0, speed_ms=15.0, height_m=1.5),
     "catapult-nav": Catapult(pitch_deg=10, length_m=2.0, speed_ms=15.0, height_m=1.5),
@@ -41,7 +43,8 @@ launchers = {
     "rail": LaunchRail(pitch_deg=20, length_m=3.0, height_m=1.0),
 }
 
-with Bench("rascal", sitl=sys.argv[1], launcher=launchers[style], stepped=True, faster=True) as b:
+with Bench("rascal", sitl=sys.argv[1], launcher=launchers[style], stepped=True, faster=True,
+           in_sitl="--in-sitl" in sys.argv) as b:
     if style == "catapult-nav":
         # NAV LAUNCH with nav_fw_launch_idle_thr spins the motor up to idle over 1.5 s before the throw
         b.launch(throttle=0.7, modes=("NAV LAUNCH",), wait_s=2.0)

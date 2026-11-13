@@ -95,7 +95,8 @@ def write_sitl_vehicle(vehicle, workdir, airborne, alt_m, speed_kts, heading_deg
                        launcher=None, hold_release_s=None):
     """The vehicle file for SITL's own JSBSim (--sim=jsbsim --simcfg=...) and the JSBSim initialization file it
     names, written into workdir; returns the vehicle file's path. Same model, outputs and start as Plant.
-    launcher: a Catapult the vehicle starts on. hold_release_s: an airborne start is held until this long after
+    launcher: a Catapult or LaunchRail the vehicle starts on (SITL's <catapult>; a launch rail is one without a
+    speed, released on arming, so its own thrust takes it once that beats weight and drag). hold_release_s: an airborne start is held until this long after
     arming (None: not held)."""
     if launcher:
         airborne, alt_m, speed_kts = True, launcher.height_m, 0.0
@@ -130,9 +131,11 @@ def write_sitl_vehicle(vehicle, workdir, airborne, alt_m, speed_kts, heading_deg
                 ET.SubElement(v, "servo", index=str(index), invert="true").text = prop[1:]
             else:
                 ET.SubElement(v, "servo", index=str(index)).text = prop
-    if launcher:
+    if isinstance(launcher, Catapult):
         ET.SubElement(v, "catapult", length=repr(launcher.length_m), speed=repr(launcher.speed_ms),
                       release=launcher.release, delay=repr(launcher.release_delay_s))
+    elif launcher:
+        ET.SubElement(v, "catapult", length=repr(launcher.length_m), release=RELEASE_ARM)
     elif airborne and hold_release_s is not None:
         ET.SubElement(v, "hold", release=RELEASE_ARM, delay=repr(hold_release_s))
     ET.SubElement(v, "gps", rate=str(gps_hz))

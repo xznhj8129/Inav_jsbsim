@@ -22,7 +22,7 @@ import time
 
 from . import hitl
 from .msp import Msp, MspError
-from .launchers import Catapult, LaunchRail
+from .launchers import Catapult
 from .units import KTS
 from .vehicles import HOME, PROFILES, VEHICLES, Plant, write_sitl_vehicle
 
@@ -214,8 +214,8 @@ class Bench:
             The bench writes SITL's vehicle file from the Vehicle and its start, and each tick sends only the sticks
             and the step; the truth comes back in the reply. Needs stepped. SITL lets go of the vehicle itself: an
             airborne start is held until hold_release_s after arming (release() does nothing), a Catapult fires on
-            its release condition (fire() is refused, launch() ignores wait_s). Wind, GPS loss, battery, launch
-            rails and tailsitters are not available in this mode.
+            its release condition (fire() is refused, launch() ignores wait_s), a LaunchRail's vehicle is let go on
+            arming. Wind, GPS loss, battery and tailsitters are not available in this mode.
         battery: function(bench) -> (volts, amps) fed to INAV's battery voltage and current meters every tick (the
             config needs feature VBAT and feature CURRENT_METER); None leaves INAV on a simulated full 3S pack."""
         self.vehicle = VEHICLES[vehicle] if isinstance(vehicle, str) else vehicle
@@ -240,8 +240,8 @@ class Bench:
             raise ValueError("stepped needs a rate_hz: it sets the step")
         if in_sitl and not stepped:
             raise ValueError("in_sitl runs on SITL's stepped clock: pass stepped=True")
-        if in_sitl and (isinstance(launcher, LaunchRail) or battery or self.vehicle.tailsitter):
-            raise ValueError("in_sitl has no launch rail, battery model or tailsitter frame")
+        if in_sitl and (battery or self.vehicle.tailsitter):
+            raise ValueError("in_sitl has no battery model or tailsitter frame")
         self.hold_release_s = hold_release_s
         self.in_sitl = in_sitl
         self._truth = None      # in_sitl: the truth from the last reply
@@ -549,10 +549,11 @@ class Bench:
             self.run(self._period or 0.001)
 
     def _launch_in_sitl(self, throttle, modes, arm_timeout, rail_timeout):
-        """SITL fires the catapult on its release condition; run until the vehicle has covered the rail."""
+        """SITL fires the catapult on its release condition, and lets a launch rail's vehicle go on arming;
+        run until the vehicle has covered the rail."""
         launcher = self.start_state["launcher"]
-        if not isinstance(launcher, Catapult):
-            raise RuntimeError("not on a catapult: start with Bench(launcher=Catapult(...))")
+        if not launcher:
+            raise RuntimeError("not held on a launcher: start with Bench(launcher=...)")
         start = self.truth()
         for name in modes:
             self.mode(name)
@@ -563,8 +564,11 @@ class Bench:
             t = b.truth()
             return math.dist((t["north_m"], t["east_m"], t["agl_m"]), (start["north_m"], start["east_m"], start["agl_m"]))
         if not self.run(rail_timeout, until=lambda b: travelled_m(b) >= launcher.length_m, check_every=self._period):
-            raise RuntimeError(f"still on the catapult after {rail_timeout:.0f} s: SITL did not release it "
-                               f"(release={launcher.release!r})")
+            if isinstance(launcher, Catapult):
+                raise RuntimeError(f"still on the catapult after {rail_timeout:.0f} s: SITL did not release it "
+                                   f"(release={launcher.release!r})")
+            raise RuntimeError(f"still on the launch rail after {rail_timeout:.0f} s: its thrust along the rail "
+                               f"does not beat weight and drag")
 
     def fire(self):
         """Fire the catapult the vehicle started on, nothing else: launch() does the INAV side around it."""
